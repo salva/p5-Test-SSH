@@ -1,0 +1,66 @@
+package Test::SSH;
+
+our $VERSION = '0.01';
+
+use strict;
+use warnings;
+
+sub sshd {
+    if (defined $ENV{TEST_SSH_TARGET}) {
+        my $class = 'Test::SSH::Backend::Remote';
+    }
+    else {
+        for my $be (qw(Local OpenSSH)) {
+            my $class = "Test::SSH::Backend::$be";
+            eval "require $class; 1" or die;
+            my $sshd = $class->new or next;
+            return $sshd;
+        }
+    }
+}
+
+1;
+__END__
+
+=head1 NAME
+
+Test::SSH - Perl extension for testing SSH modules.
+
+=head1 SYNOPSIS
+
+  use Test::SSH;
+  my $sshd = Test::SSH->sshd or skip_all;
+
+  my %opts;
+  $opts{host} = $sshd->host();
+  $opts{port} = $sshd->port();
+  $opts{user} = $sshd->username();
+  given($sshd->auth_method) {
+    when('password') {
+      $opts{password} = $sshd->password;
+    }
+    when('publickey') {
+      $opts{key_path} = $sshd->private_key_path;
+    }
+  }
+
+  my $openssh = Net::OpenSSH->new(%opts);
+  # or...
+  my $anyssh  = Net::SSH::Any->new(%opts);
+  # or...
+
+
+=head1 DESCRIPTION
+
+This module tries to configure and launch a private SSH daemon to be
+used for testing SSH client modules.
+
+=head1 COPYRIGHT AND LICENSE
+
+Copyright (C) 2013 by Salvador FandiE<ntilde>o (sfandino@yahoo.com)
+
+This library is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself, either Perl version 5.14.2 or,
+at your option, any later version of Perl 5 you may have available.
+
+=cut

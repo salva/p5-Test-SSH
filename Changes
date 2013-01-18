@@ -1,0 +1,6 @@
+Revision history for Perl extension Test::SSH.
+
+0.01  Fri Jan 18 11:26:31 2013
+	- original version; created by h2xs 1.23 with options
+		-AXn Test::SSH
+
