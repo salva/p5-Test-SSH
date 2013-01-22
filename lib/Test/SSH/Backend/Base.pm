@@ -36,12 +36,15 @@ sub new {
         croak "unable to infer username" unless defined $sshd->{username};
     }
 
+    $sshd->_log("starting backend of class '$class'");
+
     return $sshd;
 }
 
 sub _log {
     local ($@, $!, $?, $^E);
-    eval { shift->{logger}->(join(': ', @_)) }
+    my $sshd = shift;
+    eval { $sshd->{logger}->(join(': ', @_)) }
 }
 
 sub _error { shift->_log(error => @_) }

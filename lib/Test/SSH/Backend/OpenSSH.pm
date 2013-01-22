@@ -102,15 +102,18 @@ sub _ssh_keygen_executable { shift->_find_executable('ssh-keygen') }
 sub _create_key {
     my ($sshd, $fn) = @_;
     -f $fn and -f "$fn.pub" and return 1;
+    $sshd->_log("generating key '$fn'");
     my $tmpfn = join('.', $fn, $$, int(rand(9999999)));
     if ($sshd->_run('ssh_keygen', -t => 'dsa', -b => 1024, -f => $tmpfn, -P => '')) {
         unlink $fn;
         unlink "$fn.pub";
         if (rename $tmpfn, $fn and
             rename "$tmpfn.pub", "$fn.pub") {
+            $sshd->_log("key generated");
             return 1;
         }
     }
+    $sshd->_error("key generation failed");
     return;
 }
 
