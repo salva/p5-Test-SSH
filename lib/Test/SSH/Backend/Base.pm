@@ -53,7 +53,7 @@ sub _is_server_running { 1 }
 
 sub _try_remote_cmd {
     my ($sshd, $cmd) = @_;
-    my $ssh = $sshd->_find_ssh or return;
+    my $ssh = $sshd->_ssh_executable or return;
 
     if ($sshd->_is_server_running) {
         if ($sshd->{auth_method} eq 'publickey') {
@@ -170,7 +170,7 @@ sub _find_executable {
     }
 }
 
-sub ssh_executable { shift->_find_executable('ssh', '-V', 5) }
+sub _ssh_executable { shift->_find_executable('ssh', '-V', 5) }
 
 sub uri {
     my $sshd = shift;
