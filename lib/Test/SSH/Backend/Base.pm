@@ -21,58 +21,72 @@ for my $slot (keys %slot) {
 
 sub new {
     my ($class, %opts) = @_;
-    my $timeout = delete $opts{timeout} || 10;
-    my $self = { timeout => $timeout };
-    bless $self, $class;
+    my $sshd = {};
+    bless $sshd, $class;
+    $sshd->{$_} = delete($opts{$_}) for qw(timeout logger);
     for my $slot (keys %slot) {
         my $v = delete $opts{$slot};
-        $self->{$slot} = (defined $v ? $v : $slot{$slot});
+        $sshd->{$slot} = (defined $v ? $v : $slot{$slot});
     }
 
-    unless (defined $self->{username}) {
+    unless (defined $sshd->{username}) {
         unless ($^O =~ /^Win/) {
-            $self->{username} = getpwuid($>);
+            $sshd->{username} = getpwuid($>);
         }
-        croak "unable to infer username" unless defined $self->{username};
+        croak "unable to infer username" unless defined $sshd->{username};
     }
 
-    return $self;
+    return $sshd;
 }
 
-my $devnull = File::Spec->devnull;
+sub _log {
+    local ($@, $!, $?, $^E);
+    eval { shift->{logger}->(join(': ', @_)) }
+}
+
+sub _error { shift->_log(error => @_) }
+
+my $dev_null = File::Spec->devnull;
+sub _dev_null { $dev_null }
+
+sub _is_server_running { 1 }
 
 sub _try_remote_cmd {
-    my ($self, $cmd) = @_;
-    my $ssh = $self->_find_ssh or return;
+    my ($sshd, $cmd) = @_;
+    my $ssh = $sshd->_find_ssh or return;
 
-    if ($self->{auth_method} eq 'publickey') {
-        return $self->_try_local_cmd([ $ssh,
-                                       '-T',
-                                       -i => $self->{private_key_path},
-                                       -l => $self->{username},
-                                       -p => $self->{port},
-                                       -F => $devnull,
-                                       -o => 'PreferredAuthentications=publickey',
-                                       -o => 'BatchMode=yes',
-                                       -o => 'StrictHostKeyChecking=no',
-                                       -o => "UserKnownHostsFile=$devnull",
-                                       '--',
-                                       $self->{host},
-                                       $cmd ]);
-    }
-    else {
-        # FIXME: implement password authentication testing
-        return
+    if ($sshd->_is_server_running) {
+        if ($sshd->{auth_method} eq 'publickey') {
+            return $sshd->_try_local_cmd([ $ssh,
+                                           '-T',
+                                           -i => $sshd->{private_key_path},
+                                           -l => $sshd->{username},
+                                           -p => $sshd->{port},
+                                           -F => $dev_null,
+                                           -o => 'PreferredAuthentications=publickey',
+                                           -o => 'BatchMode=yes',
+                                           -o => 'StrictHostKeyChecking=no',
+                                           -o => "UserKnownHostsFile=$dev_null",
+                                           '--',
+                                           $sshd->{host},
+                                           $cmd ]);
+        }
+        else {
+            $sshd->_error("unable to check commands when password authentication is being used");
+            return;
+            # FIXME: implement password authentication testing
+        }
     }
 }
 
 sub _try_local_cmd {
-    my ($self, $cmd) = @_;
-    run($cmd, '<', $devnull, '>', $devnull, timeout($self->{timeout}));
+    my ($sshd, $cmd) = @_;
+    run($cmd, '<', $dev_null, '>', $dev_null, timeout($sshd->{timeout}));
 }
 
 sub _find_binaries {
-    my ($self, @names) = @_;
+    my ($sshd, @cmds) = @_;
+    $sshd->_log("resolving command(s) @cmds");
     my @paths = File::Spec->path;
     if ($^O =~ /^Win/) {
         # look for SSH in common locations
@@ -90,11 +104,26 @@ sub _find_binaries {
                            /opt/*SSH* ) );
     }
 
+    if (defined $sshd->{_ssh_executable}) {
+        my $dir = File::Spec->join((File::Spec->splitpath($sshd->{_ssh_executable}))[0,1]);
+        unshift @paths, $dir, File::Spec->join($dir, File::Spec->updir, 'sbin');
+    }
+
     my @bins;
+    $sshd->_log("search path is " . join(":", @paths));
     for my $path (@paths) {
-        for my $name (@names) {
-            my $fn = File::Spec->join($path, $name);
-            if (-f $fn and -x $fn and -B $fn) {
+        for my $cmd (@cmds) {
+            my $fn = File::Spec->join($path, $cmd);
+            if (-f $fn) {
+                $sshd->_log("candidate found at $fn");
+                unless (-x $fn) {
+                    $sshd->_log("file $fn is not executable");
+                    next;
+                }
+                unless (-B $fn) {
+                    $sshd->_log("file $fn looks like a wrapper, ignoring it");
+                    next;
+                }
                 return $fn unless wantarray;
                 push @bins, $fn;
             }
@@ -103,28 +132,112 @@ sub _find_binaries {
     return @bins;
 }
 
-sub _find_ssh {
-    my $self = shift;
-    for my $bin ($self->_find_binaries('ssh')) {
-        my $out;
-        if ( run [$bin, '-V'], '>', \$out, '2>&1', timeout($self->{timeout}) ) {
-            return $bin if $out =~ /^OpenSSH[_\-](\d+\.\d+(?:p\d+))/m;
+sub _find_executable {
+    my ($sshd, $cmd, $version_flags, $min_version) = @_;
+    my $slot = "${cmd}_executable";
+    defined $sshd->{$slot} and return $sshd->{$slot};
+    if (defined $version_flags) {
+        for my $bin ($sshd->_find_binaries($cmd)) {
+            my $out;
+            $sshd->_log("checking version of '$bin'");
+            run [$bin, $version_flags], '>', \$out, '2>&1', timeout($sshd->{timeout});
+            if (defined $out) {
+                if (my ($ver, $mayor) = $out =~ /^(OpenSSH[_\-](\d+)\.\d+(?:p\d+))/m) {
+                    if (!defined($min_version) or $mayor >= $min_version) {
+                        $sshd->_log("executable version is $ver, selecting it!");
+                        $sshd->{$slot} = $bin;
+                        last;
+                    }
+                    else {
+                        $sshd->_log("executable is too old ($ver), $min_version.x required");
+                        next;
+                    }
+                }
+            }
+            $sshd->_log("command failed");
         }
     }
-    return ();
+    else {
+        $sshd->{$slot} = $sshd->_find_binaries($cmd)
+    }
+    if (defined (my $bin = $sshd->{$slot})) {
+        $sshd->_log("command '$cmd' resolved as '$sshd->{$slot}'");
+        return $bin;
+    }
+    else {
+        $sshd->_error("no executable found for command '$cmd'");
+        return;
+    }
 }
+
+sub ssh_executable { shift->_find_executable('ssh', '-V', 5) }
 
 sub uri {
-    my $self = shift;
-    my $userinfo = $self->{username};
-    if    ($self->{auth_method} eq 'publickey') {
-        $userinfo .= ";private_key_path=$self->{private_key_path}";
+    my $sshd = shift;
+    my $userinfo = $sshd->{username};
+    if    ($sshd->{auth_method} eq 'publickey') {
+        $userinfo .= ";private_key_path=$sshd->{private_key_path}";
     }
-    elsif ($self->{auth_method} eq 'password') {
-        $userinfo .= ":$self->{password}"
+    elsif ($sshd->{auth_method} eq 'password') {
+        $userinfo .= ":$sshd->{password}"
     }
-    "ssh://$userinfo\@$self->{host}:$self->{port}"
+    "ssh://$userinfo\@$sshd->{host}:$sshd->{port}"
 }
 
+sub _mkdir {
+    my ($sshd, $dir, $mask) = @_;
+    if (defined $dir) {
+        $mask = 0700 unless defined $mask;
+        unless (-d $dir) {
+            unless (mkdir($dir, $mask) and -d $dir) {
+                $sshd->_save_error("Unable to create directory '$dir'", $!);
+                return
+            }
+        }
+        chmod $mask, $dir;
+        return 1;
+    }
+    return;
+}
+
+sub _private_dir {
+    my ($sshd, $subdir) = @_;
+    my $slot = "private_dir";
+    my $pdir = $sshd->{$slot};
+    unless (defined $pdir) {
+        unless ($^O =~ /^Win/) {
+            ($pdir) = bsd_glob("~/.libtest-ssh-perl", GLOB_TILDE|GLOB_NOCHECK);
+        }
+        unless (defined $pdir) {
+            $pdir = File::Spec->join(File::Temp::tempdir(CLEANUP => 1),
+                                     "libtest-ssh-perl");
+        }
+        $sshd->_mkdir($pdir) or return;
+        $sshd->{$slot} = $pdir;
+    };
+
+    if (defined $subdir) {
+        for my $sd (split /\//, $subdir) {
+            $slot .= "/$sd";
+            if (defined $sshd->{$slot}) {
+                $pdir = $sshd->{$slot};
+            }
+            else {
+                $pdir = File::Spec->join($pdir, $sd);
+                $sshd->_mkdir($pdir) or return;
+                $sshd->{$slot} = $pdir;
+            }
+        }
+    }
+    return $pdir;
+}
+
+sub _run {
+    my ($sshd, $cmd, @args) = @_;
+    if (my $method = ($sshd->can("${cmd}_executable") or $sshd->can("_${cmd}_executable"))) {
+        $cmd = $sshd->$method or return;
+    }
+    run([$cmd, @args], '<', $dev_null, '>', $dev_null, '2>&1');
+}
 
 1;

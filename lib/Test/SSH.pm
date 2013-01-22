@@ -5,18 +5,29 @@ our $VERSION = '0.01';
 use strict;
 use warnings;
 
+require Test::More;
+
+my @default_backends = qw(Local OpenSSH);
+
 sub sshd {
-    if (defined $ENV{TEST_SSH_TARGET}) {
-        my $class = 'Test::SSH::Backend::Remote';
+    my ($class, %opts) = @_;
+
+    my $be = delete $opts{backends};
+    my @be = ( defined $ENV{TEST_SSH_TARGET} ? qw(Remote) :
+               defined $be                   ? @$be       :
+                                               @default_backends );
+
+    $opts{timeout} = 10 unless defined $opts{timeout};
+    $opts{logger} = sub { Test::More::diag("Test::SSH > @_") }
+        unless defined $opts{logger};
+
+    for my $be (@be) {
+        my $class = "Test::SSH::Backend::$be";
+        eval "require $class; 1" or die;
+        my $sshd = $class->new(%opts) or next;
+        return $sshd;
     }
-    else {
-        for my $be (qw(Local OpenSSH)) {
-            my $class = "Test::SSH::Backend::$be";
-            eval "require $class; 1" or die;
-            my $sshd = $class->new or next;
-            return $sshd;
-        }
-    }
+    return;
 }
 
 1;
