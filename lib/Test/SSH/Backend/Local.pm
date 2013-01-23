@@ -10,29 +10,18 @@ our @ISA = qw(Test::SSH::Backend::Base);
 
 sub new {
     my ($class, %opts) = @_;
-    my $sshd = $class->SUPER::new( port => 22,
-                                   %opts,
-                                   host => 'localhost',
+    my $sshd = $class->SUPER::new( %opts,
                                    auth_method => 'publickey' );
 
-    my @keys = $sshd->_user_private_keys;
-
-    for my $cmd ('true', 'exit', 'echo foo', 'date') {
-        if ($sshd->_try_local_cmd($cmd)) {
-            for my $key (@keys) {
-                $sshd->{private_key_path} = $key;
-                return $sshd if $sshd->_try_remote_cmd($cmd);
-            }
+    for my $key (@{$sshd->{user_keys}}) {
+        $sshd->_log("trying user key '$key'");
+        $sshd->{private_key_path} = $key;
+        if ($sshd->_test_server) {
+            $sshd->_log("key '$key' can be used to connect to host");
+            return $sshd;
         }
     }
     ()
-}
-
-sub _user_private_keys {
-    grep {
-        my $fh;
-        open $fh, '<', $_ and <$fh> =~ /\bBEGIN\b.*\bPRIVATE\s+KEY\b/
-    } bsd_glob("~/.ssh/*", GLOB_TILDE);
 }
 
 1;

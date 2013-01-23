@@ -12,7 +12,12 @@ our @ISA = qw(Test::SSH::Backend::Base);
 
 sub new {
     my ($class, %opts) = @_;
-    my $sshd = $class->SUPER::new(%opts);
+    my $sshd = $class->SUPER::new(%opts, auth_method => 'publickey');
+    if ($sshd->{no_server_backends}) {
+        $sshd->_log("backend skipped");
+        return;
+    }
+
     my $bin = $sshd->_sshd_executable or return;
     $sshd->_create_keys or return;
     my $run_dir = $sshd->{run_dir} = $sshd->_private_dir("openssh/run/$$");
@@ -52,6 +57,7 @@ sub new {
     }
 
     $sshd->_log("SSH server listening on port $port");
+    $sshd->_test_server;
 
     $sshd;
 }
@@ -126,7 +132,7 @@ sub _user_key_path_quoted {
 
 sub _create_keys {
     my $sshd = shift;
-    my $kdir = $sshd->_private_dir('openssh/keys');
+    my $kdir = $sshd->_private_dir('openssh/keys') or return;
     my $user_key = $sshd->{private_key_path} = "$kdir/user_key";
     my $host_key = $sshd->{host_key_path} = "$kdir/host_key";
     $sshd->_create_key($user_key) and

@@ -6,38 +6,45 @@ use IPC::Run qw(run timeout);
 use File::Spec;
 use File::Glob qw(:glob);
 use Carp;
+use POSIX;
 
-my %slot = ( host => undef,
-             port => 22,
-             auth_method => undef,
-             password => undef,
-             username => undef,
-             private_key_path => undef );
+use Test::SSH::Patch::URI::ssh;
 
-for my $slot (keys %slot) {
+my @private = qw(timeout logger test_commands path user_keys private_dir requested_uri no_server_backends c_params);
+my @public  = qw(host port auth_method password username private_key_path);
+for my $accessor (@public) {
     no strict 'refs';
-    *$slot = sub { shift->{$slot} }
+    *$accessor = sub { shift->{$accessor} }
 }
 
 sub new {
     my ($class, %opts) = @_;
+
     my $sshd = {};
     bless $sshd, $class;
-    $sshd->{$_} = delete($opts{$_}) for qw(timeout logger);
-    for my $slot (keys %slot) {
-        my $v = delete $opts{$slot};
-        $sshd->{$slot} = (defined $v ? $v : $slot{$slot});
-    }
+    $sshd->{$_} = delete($opts{$_}) for (@public, @private);
 
-    unless (defined $sshd->{username}) {
-        unless ($^O =~ /^Win/) {
-            $sshd->{username} = getpwuid($>);
+    if (defined (my $uri_txt =  $sshd->{requested_uri})) {
+        my $uri = URI->new($uri_txt);
+        $uri->scheme('ssh') unless defined $uri->scheme;
+        if ($uri->scheme ne 'ssh') {
+            $sshd->_error("not a ssh URI '$uri'");
+            return;
         }
-        croak "unable to infer username" unless defined $sshd->{username};
+
+        for my $k (qw(password host port user c_params)) {
+            my $v = $uri->$k;
+            $sshd->{$k} = $v if defined $v;
+        }
+
+        for (@{$opts{c_params} || []}) {
+            if (/^private_key_path=(.*)$/) {
+                $sshd->{user_keys} = [$1];
+            }
+        }
     }
 
     $sshd->_log("starting backend of class '$class'");
-
     return $sshd;
 }
 
@@ -59,7 +66,8 @@ sub _try_remote_cmd {
     my $ssh = $sshd->_ssh_executable or return;
 
     if ($sshd->_is_server_running) {
-        if ($sshd->{auth_method} eq 'publickey') {
+        my $auth_method = $sshd->{auth_method};
+        if ($auth_method eq 'publickey') {
             return $sshd->_try_local_cmd([ $ssh,
                                            '-T',
                                            -i => $sshd->{private_key_path},
@@ -74,47 +82,108 @@ sub _try_remote_cmd {
                                            $sshd->{host},
                                            $cmd ]);
         }
-        else {
-            $sshd->_error("unable to check commands when password authentication is being used");
-            return;
-            # FIXME: implement password authentication testing
+        elsif ($auth_method eq 'password') {
+            return $sshd->_try_local_cmd_with_password([ $ssh,
+                                                         '-T',
+                                                         -l => $sshd->{username},
+                                                         -p => $sshd->{port},
+                                                         -F => $dev_null,
+                                                         -o => 'PreferredAuthentications=password,keyboard-interactive',
+                                                         -o => 'BatchMode=no',
+                                                         -o => 'StrictHostKeyChecking=no',
+                                                         -o => "UserKnownHostsFile=$dev_null",
+                                                         '--',
+                                                         $sshd->{host},
+                                                         $cmd ]);
         }
     }
 }
 
 sub _try_local_cmd {
     my ($sshd, $cmd) = @_;
-    run($cmd, '<', $dev_null, '>', $dev_null, timeout($sshd->{timeout}));
+    $cmd = [$cmd] unless ref $cmd;
+    $sshd->_log("running command '@$cmd'");
+    my $ok = run($cmd, '<', $dev_null, '>', $dev_null, '2>&1', timeout($sshd->{timeout}));
+    $sshd->_log($ok ? "command run successfully" : "command failed, (rc: $?)");
+    $ok
 }
+
+sub _try_local_cmd_with_password {
+    my ($sshd, $cmd) = @_;
+
+    if ($^O =~ /^Win/) {
+        $sshd->_error("password authentication not supported on inferior OS");
+        return;
+    }
+    unless (eval {require IO::Pty; 1}) {
+        $sshd->_error("IO::Pty not available");
+        return;
+    }
+
+    my $pty = IO::Pty->new;
+    my $pid = fork;
+    unless ($pid) {
+        unless (defined $pid) {
+            $sshd->_error("fork failed: $!");
+            return;
+        }
+        $pty->make_slave_controlling_terminal;
+        if (open my $in, '</dev/null') {
+            POSIX::dup2(fileno($in), 0);
+        }
+        if (open my $out, '>/dev/null') {
+            POSIX::dup2(fileno($out), 1);
+            POSIX::dup2(1, 2);
+        }
+        do { exec @$cmd };
+        POSIX::_exit(1);
+    }
+
+    my $end = time + $sshd->{timeout};
+    my $state = 'password';
+    my $buffer = '';
+
+    while (time <= $end) {
+        if (waitpid($pid, POSIX::WNOHANG()) < 0) {
+            return $? == 0;
+        }
+        my $bytes = sysread($pty, $buffer, 4096, length($buffer));
+        if ($bytes) {
+            if ($state eq 'password') {
+                if ($buffer =~ /[:?]\s*$/) {
+                    print $pty "$sshd->{password}\n";
+                    $buffer = '';
+                    $state = 'get_reply';
+                }
+            }
+            elsif ($state eq 'get_reply') {
+                if ($buffer =~ /\n/) {
+                    $state = 'ending';
+                }
+            }
+            else {
+                $buffer = '';
+            }
+        }
+        sleep(1);
+    }
+    return;
+}
+
 
 sub _find_binaries {
     my ($sshd, @cmds) = @_;
     $sshd->_log("resolving command(s) @cmds");
-    my @paths = File::Spec->path;
-    if ($^O =~ /^Win/) {
-        # look for SSH in common locations
-    }
-    else {
-        push @paths, ( map { ( File::Spec->join($_, 'bin'),
-                               File::Spec->join($_, 'sbin') ) }
-                       map { File::Spec->rel2abs($_) }
-                       map { bsd_glob($_, GLOB_TILDE|GLOB_NOCASE) }
-                       qw( /
-                           /usr
-                           /usr/local
-                           ~/
-                           /usr/local/*ssh*
-                           /opt/*SSH* ) );
-    }
+    my @path = @{$sshd->{path}};
 
     if (defined $sshd->{_ssh_executable}) {
         my $dir = File::Spec->join((File::Spec->splitpath($sshd->{_ssh_executable}))[0,1]);
-        unshift @paths, $dir, File::Spec->join($dir, File::Spec->updir, 'sbin');
+        unshift @path, $dir, File::Spec->join($dir, File::Spec->updir, 'sbin');
     }
 
     my @bins;
-    $sshd->_log("search path is " . join(":", @paths));
-    for my $path (@paths) {
+    $sshd->_log("search path is " . join(":", @path));
+    for my $path (@path) {
         for my $cmd (@cmds) {
             my $fn = File::Spec->join($path, $cmd);
             if (-f $fn) {
@@ -176,29 +245,26 @@ sub _find_executable {
 sub _ssh_executable { shift->_find_executable('ssh', '-V', 5) }
 
 sub uri {
-    my $sshd = shift;
+    my ($sshd, %opts) = @_;
     my $userinfo = $sshd->{username};
-    if    ($sshd->{auth_method} eq 'publickey') {
+    if ($sshd->{auth_method} eq 'publickey') {
         $userinfo .= ";private_key_path=$sshd->{private_key_path}";
     }
     elsif ($sshd->{auth_method} eq 'password') {
-        $userinfo .= ":$sshd->{password}"
+        $userinfo .= ':' . ($opts{hide_password} ? '*****' : $sshd->{password});
     }
     "ssh://$userinfo\@$sshd->{host}:$sshd->{port}"
 }
 
 sub _mkdir {
-    my ($sshd, $dir, $mask) = @_;
+    my ($sshd, $dir) = @_;
     if (defined $dir) {
-        $mask = 0700 unless defined $mask;
-        unless (-d $dir) {
-            unless (mkdir($dir, $mask) and -d $dir) {
-                $sshd->_save_error("Unable to create directory '$dir'", $!);
-                return
-            }
+        -d $dir and return 1;
+        if (mkdir($dir, 0700) and -d $dir) {
+            $sshd->_log("directory '$dir' created");
+            return 1;
         }
-        chmod $mask, $dir;
-        return 1;
+        $sshd->_error("unable to create directory '$dir'", $!);
     }
     return;
 }
@@ -207,17 +273,7 @@ sub _private_dir {
     my ($sshd, $subdir) = @_;
     my $slot = "private_dir";
     my $pdir = $sshd->{$slot};
-    unless (defined $pdir) {
-        unless ($^O =~ /^Win/) {
-            ($pdir) = bsd_glob("~/.libtest-ssh-perl", GLOB_TILDE|GLOB_NOCHECK);
-        }
-        unless (defined $pdir) {
-            $pdir = File::Spec->join(File::Temp::tempdir(CLEANUP => 1),
-                                     "libtest-ssh-perl");
-        }
-        $sshd->_mkdir($pdir) or return;
-        $sshd->{$slot} = $pdir;
-    };
+    $sshd->_mkdir($pdir) or return;
 
     if (defined $subdir) {
         for my $sd (split /\//, $subdir) {
@@ -241,6 +297,19 @@ sub _run {
         $cmd = $sshd->$method or return;
     }
     run([$cmd, @args], '<', $dev_null, '>', $dev_null, '2>&1');
+}
+
+sub _test_server {
+    my $sshd = shift;
+    for my $cmd (@{$sshd->{test_commands}}) {
+        if (defined $sshd->{uri} or $sshd->_try_local_cmd($cmd)) {
+            if ($sshd->_try_remote_cmd($cmd)) {
+                $sshd->_log("connection ok");
+                return 1;
+            }
+        }
+    }
+    ()
 }
 
 1;
