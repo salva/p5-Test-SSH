@@ -329,4 +329,37 @@ sub connection_params {
     }
 }
 
+sub server_version {
+    my $sshd = shift;
+    unless (defined $sshd->{server_version}) {
+        $sshd->_log("retrieving server version");
+        require IO::Socket::INET;
+        my $end = time + $sshd->{timeout};
+        my $buffer = '';
+        if (my $socket = IO::Socket::INET->new(PeerAddr => $sshd->{host},
+                                               PeerPort => $sshd->{port},
+                                               Timeout  => $sshd->{timeout},
+                                               Proto    => 'tcp',
+                                               Blocking => 0)) {
+            while (time <= $end and $buffer !~ /\n/) {
+                my $rv = '';
+                vec($rv, fileno($socket), 1) = 1;
+                if (select($rv, undef, undef, 1) > 0) {
+                    sysread($socket, $buffer, 1024, length($buffer)) or last;
+                }
+            }
+            if ($buffer =~ /^(.*)\n/) {
+                $sshd->{server_version} = $1;
+            }
+            else {
+                $sshd->_log("unable to retrieve server version");
+            }
+        }
+        else {
+            $sshd->_log("unable to connect to server", $!);
+        }
+    }
+    $sshd->{server_version}
+}
+
 1;

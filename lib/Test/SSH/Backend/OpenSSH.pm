@@ -180,7 +180,7 @@ sub _find_unused_port {
         my $port = 5000 + int rand 27000;
         unless (IO::Socket::INET->new(PeerAddr => "localhost:$port",
                                       Proto => 'tcp',
-                                      Timeout => 10)) {
+                                      Timeout => $sshd->{timeout})) {
             $sshd->_log("port $port is available");
             return $port;
         }
