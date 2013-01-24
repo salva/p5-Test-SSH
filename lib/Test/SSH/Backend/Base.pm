@@ -10,7 +10,7 @@ use POSIX;
 
 use Test::SSH::Patch::URI::ssh;
 
-my @private = qw(timeout logger test_commands path user_keys private_dir requested_uri run_serverq c_params);
+my @private = qw(timeout logger test_commands path user_keys private_dir requested_uri run_server c_params);
 my @public  = qw(host port auth_method password user key_path);
 for my $accessor (@public) {
     no strict 'refs';
