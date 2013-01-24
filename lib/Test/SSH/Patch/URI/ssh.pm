@@ -6,7 +6,8 @@ no warnings 'redefine';
 
 require URI::ssh;
 unless (URI::ssh->can('c_params')) {
-    package URI::ssh;
+    package
+        URI::ssh; # don't index me PAUSE!
 
     *sshinfo = sub {
         my $self = shift;

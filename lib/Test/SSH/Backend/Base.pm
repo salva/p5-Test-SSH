@@ -10,8 +10,8 @@ use POSIX;
 
 use Test::SSH::Patch::URI::ssh;
 
-my @private = qw(timeout logger test_commands path user_keys private_dir requested_uri no_server_backends c_params);
-my @public  = qw(host port auth_method password username private_key_path);
+my @private = qw(timeout logger test_commands path user_keys private_dir requested_uri run_serverq c_params);
+my @public  = qw(host port auth_method password user key_path);
 for my $accessor (@public) {
     no strict 'refs';
     *$accessor = sub { shift->{$accessor} }
@@ -38,7 +38,7 @@ sub new {
         }
 
         for (@{$opts{c_params} || []}) {
-            if (/^private_key_path=(.*)$/) {
+            if (/^key_path=(.*)$/) {
                 $sshd->{user_keys} = [$1];
             }
         }
@@ -70,8 +70,8 @@ sub _try_remote_cmd {
         if ($auth_method eq 'publickey') {
             return $sshd->_try_local_cmd([ $ssh,
                                            '-T',
-                                           -i => $sshd->{private_key_path},
-                                           -l => $sshd->{username},
+                                           -i => $sshd->{key_path},
+                                           -l => $sshd->{user},
                                            -p => $sshd->{port},
                                            -F => $dev_null,
                                            -o => 'PreferredAuthentications=publickey',
@@ -85,13 +85,14 @@ sub _try_remote_cmd {
         elsif ($auth_method eq 'password') {
             return $sshd->_try_local_cmd_with_password([ $ssh,
                                                          '-T',
-                                                         -l => $sshd->{username},
+                                                         -l => $sshd->{user},
                                                          -p => $sshd->{port},
                                                          -F => $dev_null,
                                                          -o => 'PreferredAuthentications=password,keyboard-interactive',
                                                          -o => 'BatchMode=no',
                                                          -o => 'StrictHostKeyChecking=no',
                                                          -o => "UserKnownHostsFile=$dev_null",
+                                                         -o => 'NumberOfPasswordPrompts=1',
                                                          '--',
                                                          $sshd->{host},
                                                          $cmd ]);
@@ -103,13 +104,16 @@ sub _try_local_cmd {
     my ($sshd, $cmd) = @_;
     $cmd = [$cmd] unless ref $cmd;
     $sshd->_log("running command '@$cmd'");
-    my $ok = run($cmd, '<', $dev_null, '>', $dev_null, '2>&1', timeout($sshd->{timeout}));
+    local $@;
+    my $ok = eval { run($cmd, '<', $dev_null, '>', $dev_null, '2>&1', timeout($sshd->{timeout})) };
     $sshd->_log($ok ? "command run successfully" : "command failed, (rc: $?)");
     $ok
 }
 
 sub _try_local_cmd_with_password {
     my ($sshd, $cmd) = @_;
+
+    $sshd->_log("running command '@$cmd' with password");
 
     if ($^O =~ /^Win/) {
         $sshd->_error("password authentication not supported on inferior OS");
@@ -140,32 +144,27 @@ sub _try_local_cmd_with_password {
     }
 
     my $end = time + $sshd->{timeout};
-    my $state = 'password';
     my $buffer = '';
 
-    while (time <= $end) {
-        if (waitpid($pid, POSIX::WNOHANG()) < 0) {
+    while (1) {
+        if (time > $end) {
+            kill ((time - $end > 3 ? 'KILL' : 'TERM'), $pid);
+        }
+
+        if (waitpid($pid, POSIX::WNOHANG()) > 0) {
+            $sshd->_log("program ended with code $?");
             return $? == 0;
         }
-        my $bytes = sysread($pty, $buffer, 4096, length($buffer));
-        if ($bytes) {
-            if ($state eq 'password') {
-                if ($buffer =~ /[:?]\s*$/) {
+        my $rv = '';
+        vec($rv, fileno($pty), 1) = 1;
+        if (select($rv, undef, undef, 1) > 0) {
+            if (sysread($pty, $buffer, 4096, length($buffer))) {
+                if ($buffer =~ s/.*[:?]\s*$//s) {
                     print $pty "$sshd->{password}\n";
-                    $buffer = '';
-                    $state = 'get_reply';
                 }
             }
-            elsif ($state eq 'get_reply') {
-                if ($buffer =~ /\n/) {
-                    $state = 'ending';
-                }
-            }
-            else {
-                $buffer = '';
-            }
+            select(undef, undef, undef, 0.1);
         }
-        sleep(1);
     }
     return;
 }
@@ -244,18 +243,6 @@ sub _find_executable {
 
 sub _ssh_executable { shift->_find_executable('ssh', '-V', 5) }
 
-sub uri {
-    my ($sshd, %opts) = @_;
-    my $userinfo = $sshd->{username};
-    if ($sshd->{auth_method} eq 'publickey') {
-        $userinfo .= ";private_key_path=$sshd->{private_key_path}";
-    }
-    elsif ($sshd->{auth_method} eq 'password') {
-        $userinfo .= ':' . ($opts{hide_password} ? '*****' : $sshd->{password});
-    }
-    "ssh://$userinfo\@$sshd->{host}:$sshd->{port}"
-}
-
 sub _mkdir {
     my ($sshd, $dir) = @_;
     if (defined $dir) {
@@ -296,13 +283,14 @@ sub _run {
     if (my $method = ($sshd->can("${cmd}_executable") or $sshd->can("_${cmd}_executable"))) {
         $cmd = $sshd->$method or return;
     }
-    run([$cmd, @args], '<', $dev_null, '>', $dev_null, '2>&1');
+    local $@;
+    eval { run([$cmd, @args], '<', $dev_null, '>', $dev_null, '2>&1') };
 }
 
 sub _test_server {
     my $sshd = shift;
     for my $cmd (@{$sshd->{test_commands}}) {
-        if (defined $sshd->{uri} or $sshd->_try_local_cmd($cmd)) {
+        if (defined $sshd->{requested_uri} or $sshd->_try_local_cmd($cmd)) {
             if ($sshd->_try_remote_cmd($cmd)) {
                 $sshd->_log("connection ok");
                 return 1;
@@ -310,6 +298,35 @@ sub _test_server {
         }
     }
     ()
+}
+
+sub uri {
+    my ($sshd, %opts) = @_;
+    my $auth_method = $sshd->{auth_method};
+    my $uri = URI->new;
+    $uri->scheme('ssh');
+    $uri->user($sshd->{user});
+    $uri->host($sshd->{host});
+    $uri->port($sshd->{port});
+    if ($auth_method eq 'password') {
+        $uri->password($opts{hide_passord} ? '*****' : $sshd->{password});
+    }
+    elsif ($auth_method eq 'publickey') {
+        $uri->c_params(["key_path=$sshd->{key_path}"]);
+    }
+    $uri;
+}
+
+sub connection_params {
+    my $sshd = shift;
+    if (wantarray) {
+        my @keys = qw(host port user);
+        push @keys, ($sshd->{auth_method} eq 'password' ? 'password' : 'key_path');
+        return map { $_ => $sshd->$_ } @keys;
+    }
+    else {
+        return $sshd->uri;
+    }
 }
 
 1;

@@ -13,38 +13,37 @@ our @ISA = qw(Test::SSH::Backend::Base);
 sub new {
     my ($class, %opts) = @_;
     my $sshd = $class->SUPER::new(%opts, auth_method => 'publickey');
-    if ($sshd->{no_server_backends}) {
-        $sshd->_log("backend skipped");
+    unless ($sshd->{run_server}) {
+        $sshd->_log("backend skipped because run_server is set to false");
         return;
     }
 
     my $bin = $sshd->_sshd_executable or return;
     $sshd->_create_keys or return;
-    my $run_dir = $sshd->{run_dir} = $sshd->_private_dir("openssh/run/$$");
-    $sshd->{run_dir_last} = $sshd->_private_dir('openssh/run/last');
+    my $run_dir = $sshd->_run_dir;
     my $port = $sshd->{port} = $sshd->_find_unused_port;
 
-    my $pid_file = "$run_dir/sshd.pid";
+    $sshd->_write_config(HostKey            => $sshd->{host_key_path},
+                         AuthorizedKeysFile => $sshd->_user_key_path_quoted . ".pub",
+                         AllowUsers         => $sshd->{user}, # only user running the script can log
+                         AllowTcpForwarding => 'yes',
+                         GatewayPorts       => 'no', # bind port forwarder listener to localhost only
+                         ChallengeResponseAuthentication => 'no',
+                         PasswordAuthentication => 'no',
+                         Port               => $port,
+                         ListenAddress      => "localhost:$port",
+                         LogLevel           => 'INFO',
+                         PermitRootLogin    => 'yes',
+                         PidFile            => "$run_dir/sshd.pid",
+                         PrintLastLog       => 'no',
+                         PrintMotd          => 'no',
+                         UseDNS             => 'no')
+        or return;
 
-    # TODO: save arguments into configuration file so that it can be relaunched by hand
     my @args = ('-D', # no daemon
                 '-e', # send output to STDERR
-                '-f', $sshd->_dev_null,
-                '-o', "HostKey=$sshd->{host_key_path}",
-                '-o', "AuthorizedKeysFile=" . $sshd->_user_key_path_quoted . ".pub",
-                '-o', "AllowUsers=$sshd->{username}", # only user running the script can log
-                '-o', 'AllowTcpForwarding=yes',
-                '-o', 'GatewayPorts=no', # bind port forwarder listener to localhost only
-                '-o', 'ChallengeResponseAuthentication=no',
-                '-o', 'PasswordAuthentication=no',
-                '-o', "Port=$port",
-                '-o', "ListenAddress=127.0.0.1:$port",
-                '-o', 'LogLevel=INFO',
-                '-o', 'PermitRootLogin=no',
-                '-o', "PidFile=$run_dir/sshd.pid",
-                '-o', 'PrintLastLog=no',
-                '-o', 'PrintMotd=no',
-                '-o', 'UseDNS=no');
+                '-f', $sshd->{config_file});
+
 
     $sshd->_log("starting SSH server '$bin'");
 
@@ -57,9 +56,43 @@ sub new {
     }
 
     $sshd->_log("SSH server listening on port $port");
-    $sshd->_test_server;
 
-    $sshd;
+    $sshd->_log("trying to authenticate using keys");
+    $sshd->{auth_method} = 'publickey';
+    for my $key (@{$sshd->{user_keys}}) {
+        $sshd->_log("trying user key '$key'");
+        $sshd->{key_path} = $key;
+        if ($sshd->_test_server) {
+            $sshd->_log("key '$key' can be used to connect to host");
+            return $sshd;
+        }
+    }
+    ()
+}
+
+sub _run_dir {
+    my $sshd = shift;
+    unless (defined $sshd->{run_dir}) {
+        $sshd->{run_dir} = $sshd->_private_dir("openssh/run/$$");
+    }
+    $sshd->{run_dir}
+}
+
+sub _run_dir_last { shift->_private_dir("openssh/run/last") }
+
+sub _write_config {
+    my $sshd = shift;
+    my $fn = $sshd->{config_file} = "$sshd->{run_dir}/sshd_config";
+    if (open my $fn, '>', $fn) {
+        while (@_) {
+            my $k = shift;
+            my $v = shift;
+            print $fn "$k=$v\n";
+        }
+        close $fn and return 1
+    }
+    $sshd->_error("unable to create sshd configuration file at '$fn': $!");
+    ()
 }
 
 sub _is_server_running {
@@ -82,7 +115,7 @@ sub DESTROY {
         };
     }
     my $run_dir = $sshd->{run_dir};
-    my $last = $sshd->{run_dir_last};
+    my $last = $sshd->_run_dir_last;
 
     if (defined $run_dir) {
         for my $signal (qw(TERM TERM TERM TERM KILL)) {
@@ -125,7 +158,7 @@ sub _create_key {
 
 sub _user_key_path_quoted {
     my $sshd = shift;
-    my $key = $sshd->{private_key_path};
+    my $key = $sshd->{user_key_path};
     $key =~ s/%/%%/g;
     $key;
 }
@@ -133,21 +166,26 @@ sub _user_key_path_quoted {
 sub _create_keys {
     my $sshd = shift;
     my $kdir = $sshd->_private_dir('openssh/keys') or return;
-    my $user_key = $sshd->{private_key_path} = "$kdir/user_key";
+    my $user_key = $sshd->{user_key_path} = "$kdir/user_key";
     my $host_key = $sshd->{host_key_path} = "$kdir/host_key";
+    $sshd->{user_keys} = [$user_key];
     $sshd->_create_key($user_key) and
     $sshd->_create_key($host_key);
 }
 
 sub _find_unused_port {
     my $sshd = shift;
+    $sshd->_log("looking for an unused TCP port");
     for (1..32) {
         my $port = 5000 + int rand 27000;
-        my $s = IO::Socket::INET->new(PeerAddr => "localhost:$port",
+        unless (IO::Socket::INET->new(PeerAddr => "localhost:$port",
                                       Proto => 'tcp',
-                                      Timeout => 10) or return $port;
+                                      Timeout => 10)) {
+            $sshd->_log("port $port is available");
+            return $port;
+        }
     }
-    $sshd->_save_error("Can't find free TCP port for SSH server");
+    $sshd->_error("Can't find free TCP port for SSH server");
     return;
 }
 

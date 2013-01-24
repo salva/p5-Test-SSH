@@ -1,18 +1,14 @@
-# Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl Test-SSH.t'
-
-#########################
-
-# change 'tests => 1' to 'tests => last_test_to_print';
+#!/usr/bin/perl
 
 use strict;
 use warnings;
 
-use Test::More tests => 1;
-BEGIN { use_ok('Test::SSH') };
+use Test::More tests => 4;
 
-#########################
+use_ok('Test::SSH');
 
-# Insert your test code below, the Test::More module is use()ed here so read
-# its man page ( perldoc Test::More ) for help writing this test script.
+ok(eval { Test::SSH->new; 1});
+ok(eval { Test::SSH->new(backends=>[qw(Remote)]); 1});
+ok(eval { Test::SSH->new(backends=>[qw(OpenSSH)]); 1});
+
 
