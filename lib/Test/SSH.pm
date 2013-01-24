@@ -1,6 +1,6 @@
 package Test::SSH;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 use strict;
 use warnings;
@@ -289,6 +289,10 @@ password will be replaced by five asterisks on the returned URI.
 =item my %params = $sshd-E<gt>connection_params
 
 Returns the connection parameters as a list of key/value pairs.
+
+=item $sshd-E<gt>server_version
+
+Connects to the server and retrieves its version signature.
 
 =back
 
