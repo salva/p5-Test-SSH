@@ -2,11 +2,11 @@ package Test::SSH::Backend::Base;
 
 use strict;
 use warnings;
-use IPC::Run qw(run timeout);
 use File::Spec;
 use File::Glob qw(:glob);
 use Carp;
 use POSIX;
+use FileHandle;
 
 use Test::SSH::Patch::URI::ssh;
 
@@ -44,14 +44,20 @@ sub new {
         }
     }
 
+    $sshd->_write_fh('log'); # opens log file
     $sshd->_log("starting backend of class '$class'");
+
     return $sshd;
 }
 
 sub _log {
     local ($@, $!, $?, $^E);
     my $sshd = shift;
-    eval { $sshd->{logger}->(join(': ', @_)) }
+    my $line = join(': ', @_);
+    if (defined (my $fhs = $sshd->{log_fhs})) {
+        print {$fhs->[1]} "# Test::SSH > $line\n"
+    }
+    eval { $sshd->{logger}->($line) }
 }
 
 sub _error { shift->_log(error => @_) }
@@ -59,116 +65,43 @@ sub _error { shift->_log(error => @_) }
 my $dev_null = File::Spec->devnull;
 sub _dev_null { $dev_null }
 
-sub _is_server_running { 1 }
+sub _is_server_running { defined(shift->server_version) }
 
-sub _try_remote_cmd {
-    my ($sshd, $cmd) = @_;
-    my $ssh = $sshd->_ssh_executable or return;
+sub _run_remote_cmd {
+    my ($sshd, @cmd) = @_;
 
     if ($sshd->_is_server_running) {
         my $auth_method = $sshd->{auth_method};
+        my (@auth_args, @auth_opts);
         if ($auth_method eq 'publickey') {
-            return $sshd->_try_local_cmd([ $ssh,
-                                           '-T',
-                                           -i => $sshd->{key_path},
-                                           -l => $sshd->{user},
-                                           -p => $sshd->{port},
-                                           -F => $dev_null,
-                                           -o => 'PreferredAuthentications=publickey',
-                                           -o => 'BatchMode=yes',
-                                           -o => 'StrictHostKeyChecking=no',
-                                           -o => "UserKnownHostsFile=$dev_null",
-                                           '--',
-                                           $sshd->{host},
-                                           $cmd ]);
+            @auth_args = ( -i => $sshd->{key_path},
+                           -o => 'PreferredAuthentications=publickey',
+                           -o => 'BatchMode=yes' );
         }
         elsif ($auth_method eq 'password') {
-            return $sshd->_try_local_cmd_with_password([ $ssh,
-                                                         '-T',
-                                                         -l => $sshd->{user},
-                                                         -p => $sshd->{port},
-                                                         -F => $dev_null,
-                                                         -o => 'PreferredAuthentications=password,keyboard-interactive',
-                                                         -o => 'BatchMode=no',
-                                                         -o => 'StrictHostKeyChecking=no',
-                                                         -o => "UserKnownHostsFile=$dev_null",
-                                                         -o => 'NumberOfPasswordPrompts=1',
-                                                         '--',
-                                                         $sshd->{host},
-                                                         $cmd ]);
+            @auth_args = ( -o => 'PreferredAuthentications=password,keyboard-interactive',
+                           -o => 'BatchMode=no' );
+            @auth_opts = ( password => $sshd->{password} );
         }
-    }
-}
-
-sub _try_local_cmd {
-    my ($sshd, $cmd) = @_;
-    $cmd = [$cmd] unless ref $cmd;
-    $sshd->_log("running command '@$cmd'");
-    local $@;
-    my $ok = eval { run($cmd, '<', $dev_null, '>', $dev_null, '2>&1', timeout($sshd->{timeout})) };
-    $sshd->_log($ok ? "command run successfully" : "command failed, (rc: $?)");
-    $ok
-}
-
-sub _try_local_cmd_with_password {
-    my ($sshd, $cmd) = @_;
-
-    $sshd->_log("running command '@$cmd' with password");
-
-    if ($^O =~ /^Win/) {
-        $sshd->_error("password authentication not supported on inferior OS");
-        return;
-    }
-    unless (eval {require IO::Pty; 1}) {
-        $sshd->_error("IO::Pty not available");
-        return;
-    }
-
-    my $pty = IO::Pty->new;
-    my $pid = fork;
-    unless ($pid) {
-        unless (defined $pid) {
-            $sshd->_error("fork failed: $!");
+        else {
+            $sshd->_error("unsupported authentication method $auth_method");
             return;
         }
-        $pty->make_slave_controlling_terminal;
-        if (open my $in, '</dev/null') {
-            POSIX::dup2(fileno($in), 0);
-        }
-        if (open my $out, '>/dev/null') {
-            POSIX::dup2(fileno($out), 1);
-            POSIX::dup2(1, 2);
-        }
-        do { exec @$cmd };
-        POSIX::_exit(1);
+
+        return $sshd->_run_cmd( { search_binary => 1, @auth_opts },
+                                'ssh',
+                                '-T',
+                                -F => $dev_null,
+                                -p => $sshd->{port},
+                                -l => $sshd->{user},
+                                -o => 'StrictHostKeyChecking=no',
+                                -o => "UserKnownHostsFile=$dev_null",
+                                @auth_args,
+                                '--',
+                                $sshd->{host},
+                                @cmd );
     }
-
-    my $end = time + $sshd->{timeout};
-    my $buffer = '';
-
-    while (1) {
-        if (time > $end) {
-            kill ((time - $end > 3 ? 'KILL' : 'TERM'), $pid);
-        }
-
-        if (waitpid($pid, POSIX::WNOHANG()) > 0) {
-            $sshd->_log("program ended with code $?");
-            return $? == 0;
-        }
-        my $rv = '';
-        vec($rv, fileno($pty), 1) = 1;
-        if (select($rv, undef, undef, 1) > 0) {
-            if (sysread($pty, $buffer, 4096, length($buffer))) {
-                if ($buffer =~ s/.*[:?]\s*$//s) {
-                    print $pty "$sshd->{password}\n";
-                }
-            }
-            select(undef, undef, undef, 0.1);
-        }
-    }
-    return;
 }
-
 
 sub _find_binaries {
     my ($sshd, @cmds) = @_;
@@ -209,9 +142,8 @@ sub _find_executable {
     defined $sshd->{$slot} and return $sshd->{$slot};
     if (defined $version_flags) {
         for my $bin ($sshd->_find_binaries($cmd)) {
-            my $out;
             $sshd->_log("checking version of '$bin'");
-            run [$bin, $version_flags], '>', \$out, '2>&1', timeout($sshd->{timeout});
+            my $out = $sshd->_capture_cmd( $bin, $version_flags );
             if (defined $out) {
                 if (my ($ver, $mayor) = $out =~ /^(OpenSSH[_\-](\d+)\.\d+(?:p\d+))/m) {
                     if (!defined($min_version) or $mayor >= $min_version) {
@@ -278,20 +210,178 @@ sub _private_dir {
     return $pdir;
 }
 
-sub _run {
-    my ($sshd, $cmd, @args) = @_;
-    if (my $method = ($sshd->can("${cmd}_executable") or $sshd->can("_${cmd}_executable"))) {
-        $cmd = $sshd->$method or return;
+sub _backend_dir {
+    my ($sshd, $subdir) = @_;
+    my $class = (ref $sshd ? ref $sshd : $sshd);
+    if (my ($be) = $class =~ /\b(\w+)$/) {
+        return $sshd->_private_dir(lc($be) . '/' . $subdir);
     }
-    local $@;
-    eval { run([$cmd, @args], '<', $dev_null, '>', $dev_null, '2>&1') };
+    $sshd->_error("unable to infer backend name!");
+    return
+}
+
+sub _run_dir {
+    my $sshd = shift;
+    unless (defined $sshd->{run_dir}) {
+        $sshd->{run_dir} = $sshd->_backend_dir("run/$$");
+        # $sshd->_log(run_dir => $sshd->{run_dir});
+    }
+    $sshd->{run_dir}
+}
+
+sub _run_dir_last { shift->_backend_dir('openssh/run/last') }
+
+sub _fh {
+    my ($sshd, $name, $write) = @_;
+    my $slot = "${name}_fhs";
+    unless (defined $sshd->{$slot}) {
+        my $fn = File::Spec->join($sshd->_run_dir, "$name.out");
+        my ($rfh, $wfh);
+        unless (open $wfh, '>>', $fn) {
+            $sshd->_log("unable to open file '$fn' for writting");
+            return;
+        }
+        unless (open $rfh, '<', $fn) {
+            $sshd->_log("unable to open file '$fn' for writting");
+            return;
+        };
+        $rfh->autoflush(1);
+        $sshd->{$slot} = [$rfh, $wfh];
+    }
+    $sshd->{$slot}[$write ? 1 : 0];
+}
+
+
+sub _read_fh {
+    my ($sshd, $name) = @_;
+    $sshd->_fh($name, 0);
+}
+
+sub _write_fh {
+    my ($sshd, $name) = @_;
+    $sshd->_fh($name, 1);
+}
+
+sub _run_cmd {
+    my $sshd = shift;
+    my %opts = (ref $_[0] ? %{shift()} : ());
+    my @cmd = @_;
+
+    $sshd->_log("running command '@cmd'");
+
+    delete @{$sshd}{qw(cmd_output_offset cmd_output_name)};
+
+    if (delete $opts{search_binary}) {
+        if (my $method = ($sshd->can("$cmd[0]_executable") or $sshd->can("_$cmd[0]_executable"))) {
+            $cmd[0] = $sshd->$method;
+            defined $cmd[0] or return;
+        }
+    }
+
+    my $password = delete $opts{password};
+
+    my $out_fn = delete $opts{out_name} || 'client';
+    my $out_fh = $sshd->_write_fh($out_fn) or return;
+    print $out_fh "=" x 80, "\ncmd: @cmd\n", "-" x 80, "\n";
+    $sshd->{cmd_output_offset} = tell $out_fh;
+    $sshd->{cmd_output_name} = $out_fn;
+
+    if ($^O =~ /^Win/) {
+        if (defined $password) {
+            $sshd->_error('running commands with a password is not supported on windows');
+            return;
+        }
+        local $@;
+        my $r = eval {
+            local (*STDIN, *STDOUT, *STDERR);
+            open STDIN, '<', $dev_null or die $!;
+            open STDOUT, '>>&', $out_fh or die $!;
+            open STDOUT, '>>&', *STDOUT or die $!;
+            ( delete $opts{async}
+              ? ( system 1, @cmd )
+              : ( system(@cmd) == 0 ) )
+        };
+        $@ and $sshd->_log($@);
+        return $r;
+    }
+    else {
+        my $pty;
+        if (defined $password) {
+            unless (eval { require IO::Pty; 1 }) {
+                $sshd->_error("IO::Pty not available");
+                return;
+            }
+            $pty = IO::Pty->new;
+        }
+
+        my $pid = fork;
+        unless ($pid) {
+            unless (defined $pid) {
+                $sshd->_log("fork failed", $!);
+                return;
+            }
+            eval {
+                $pty->make_slave_controlling_terminal if $pty;
+                open my $in, '</dev/null';
+                open my $out2, '>>&', $out_fh or die $!;
+                POSIX::dup2(fileno($in),   0) or die $!;
+                POSIX::dup2(fileno($out2), 1) or die $!;
+                POSIX::dup2(1, 2) or die $!;
+                exec @cmd;
+            };
+            $@ and $sshd->_error($@);
+            exit(1);
+        }
+        if (delete $opts{async}) {
+            return (wantarray ? ($pid, $pty) : $pid);
+        }
+        else {
+            local $SIG{PIPE} = 'IGNORE';
+            my $end = time + $sshd->{timeout};
+            my $buffer = '';
+            while (1) {
+                if (time > $end) {
+                    kill ((time - $end > 3 ? 'KILL' : 'TERM'), $pid);
+                }
+                if (waitpid($pid, POSIX::WNOHANG()) > 0) {
+                    if ($?) {
+                        $sshd->_log("program failed, rc: $?");
+                        return
+                    }
+                    return 1;
+                }
+                if ($pty) {
+                    my $rv = '';
+                    vec($rv, fileno($pty), 1) = 1;
+                    if (select($rv, undef, undef, 0) > 0) {
+                        sysread($pty, $buffer, 1024, length($buffer));
+                        if ($buffer =~ s/.*[>:?]\s*$//s) {
+                            print $pty "$password\n";
+                        }
+                    }
+                }
+                select(undef, undef, undef, 0.3);
+            }
+        }
+    }
+}
+
+sub _capture_cmd {
+    my $sshd = shift;
+    $sshd->_run_cmd(@_);
+    my $name = $sshd->{cmd_output_name};
+    return unless defined $name;
+    my $fh = $sshd->_read_fh($name);
+    my $off = $sshd->{cmd_output_offset};
+    seek($fh, $off, 0);
+    do { local $/; <$fh> };
 }
 
 sub _test_server {
     my $sshd = shift;
     for my $cmd (@{$sshd->{test_commands}}) {
-        if (defined $sshd->{requested_uri} or $sshd->_try_local_cmd($cmd)) {
-            if ($sshd->_try_remote_cmd($cmd)) {
+        if (defined $sshd->{requested_uri} or $sshd->_run_cmd($cmd)) {
+            if ($sshd->_run_remote_cmd($cmd)) {
                 $sshd->_log("connection ok");
                 return 1;
             }
@@ -309,7 +399,7 @@ sub uri {
     $uri->host($sshd->{host});
     $uri->port($sshd->{port});
     if ($auth_method eq 'password') {
-        $uri->password($opts{hide_passord} ? '*****' : $sshd->{password});
+        $uri->password($opts{hidden_password} ? '*****' : $sshd->{password});
     }
     elsif ($auth_method eq 'publickey') {
         $uri->c_params(["key_path=$sshd->{key_path}"]);
@@ -328,6 +418,8 @@ sub connection_params {
         return $sshd->uri;
     }
 }
+
+
 
 sub server_version {
     my $sshd = shift;
@@ -360,6 +452,28 @@ sub server_version {
         }
     }
     $sshd->{server_version}
+}
+
+sub server_os {
+    my $sshd = shift;
+    unless (defined $sshd->{server_os}) {
+        $sshd->_log("retrieving server operating system info");
+    }
+}
+
+sub DESTROY {
+    my $sshd = shift;
+    local ($@, $!, $?, $^E);
+    eval {
+        if (defined (my $run_dir = $sshd->_run_dir)) {
+            if (defined (my $last = $sshd->_run_dir_last)) {
+                # FIXME! unixism follows:
+                system 'rm', '-Rf', '--', $last if -d $last;
+                rename $sshd->{run_dir}, $last;
+                $sshd->_log("SSH server logs moved to '$last'");
+            }
+        }
+    };
 }
 
 1;

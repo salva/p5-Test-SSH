@@ -12,6 +12,9 @@ require Test::More;
 
 my (@extra_path, @default_user_keys, $default_user, $private_dir);
 
+my @default_test_commands = ('true', 'exit', 'echo foo', 'date',
+                             'cmd /c ver', 'cmd /c echo foo');
+
 if ( $^O =~ /^Win/) {
     require Win32;
     $default_user = Win32::LoginName();
@@ -34,6 +37,7 @@ else {
     $default_user = getpwuid($>);
 
     ($private_dir) = bsd_glob("~/.libtest-ssh-perl", GLOB_TILDE|GLOB_NOCHECK);
+
 }
 
 @default_user_keys = grep {
@@ -57,7 +61,7 @@ my %defaults = ( backends      => [qw(Remote OpenSSH)],
                  port          => 22,
                  host          => 'localhost',
                  user          => $default_user,
-                 test_commands => ['true', 'exit', 'echo foo', 'date'],
+                 test_commands => \@default_test_commands,
                  path          => \@default_path,
                  user_keys     => \@default_user_keys,
                  private_dir   => $private_dir,
@@ -83,7 +87,7 @@ sub new {
         my $class = "Test::SSH::Backend::$be";
         eval "require $class; 1" or die;
         my $sshd = $class->new(%opts) or next;
-        $sshd->_log("connection uri", $sshd->uri(hide_password => 1));
+        $sshd->_log("connection uri", $sshd->uri(hidden_password => 1));
         return $sshd;
     }
     return;
@@ -279,7 +283,7 @@ The accepted options are as follows:
 
 =over 4
 
-=item hide_password => 1
+=item hidden_password => 1
 
 When this option is set and in case of password authentication, the
 password will be replaced by five asterisks on the returned URI.

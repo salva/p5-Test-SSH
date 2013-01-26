@@ -5,8 +5,6 @@ use warnings;
 
 use IO::Socket::INET;
 
-use IPC::Run qw(start finish);
-
 require Test::SSH::Backend::Base;
 our @ISA = qw(Test::SSH::Backend::Base);
 
@@ -18,7 +16,7 @@ sub new {
         return;
     }
 
-    my $bin = $sshd->_sshd_executable or return;
+    my $exe = $sshd->_sshd_executable or return;
     $sshd->_create_keys or return;
     my $run_dir = $sshd->_run_dir;
     my $port = $sshd->{port} = $sshd->_find_unused_port;
@@ -40,18 +38,14 @@ sub new {
                          UseDNS             => 'no')
         or return;
 
-    my @args = ('-D', # no daemon
-                '-e', # send output to STDERR
-                '-f', $sshd->{config_file});
-
-
-    $sshd->_log("starting SSH server '$bin'");
-
-    unless ($sshd->{harness} = start([$bin, @args],
-                                     '<', $sshd->_dev_null,
-                                     '>', "$run_dir/sshd.out",
-                                     '2>', "$run_dir/sshd.err")) {
-        $sshd->_error("unable to start SSH server at '$bin' on port $port", $!);
+    $sshd->_log('starting SSH server');
+    unless ($sshd->{server_pid} = $sshd->_run_cmd({out_name => 'server',
+                                                   async => 1},
+                                                  $exe,
+                                                  '-D', # no daemon
+                                                  '-e', # send output to STDERR
+                                                  '-f', $sshd->{config_file})) {
+        $sshd->_error("unable to start SSH server at '$exe' on port $port", $!);
         return undef;
     }
 
@@ -70,16 +64,6 @@ sub new {
     ()
 }
 
-sub _run_dir {
-    my $sshd = shift;
-    unless (defined $sshd->{run_dir}) {
-        $sshd->{run_dir} = $sshd->_private_dir("openssh/run/$$");
-    }
-    $sshd->{run_dir}
-}
-
-sub _run_dir_last { shift->_private_dir("openssh/run/last") }
-
 sub _write_config {
     my $sshd = shift;
     my $fn = $sshd->{config_file} = "$sshd->{run_dir}/sshd_config";
@@ -97,8 +81,11 @@ sub _write_config {
 
 sub _is_server_running {
     my $sshd = shift;
-    if (my $h = $sshd->{harness}) {
-        return 1 if $h->pumpable;
+    if (defined (my $pid = $sshd->{server_pid})) {
+        my $rc = waitpid($pid, POSIX::WNOHANG());
+        $rc <= 0 and return $sshd->SUPER::_is_server_running;
+        delete $sshd->{server_pid};
+        $sshd->_log("server process has terminated (rc: $?)");
     }
     $sshd->_error("SSH server is not running");
     return
@@ -107,31 +94,36 @@ sub _is_server_running {
 sub DESTROY {
     my $sshd = shift;
     local ($@, $!, $?, $^E);
-    if (my $h = $sshd->{harness}) {
-        $sshd->_log("stopping SSH server");
-        eval {
-            $h->kill_kill;
-            $sshd->_log("server stopped");
-        };
-    }
-    my $run_dir = $sshd->{run_dir};
-    my $last = $sshd->_run_dir_last;
-
-    if (defined $run_dir) {
-        for my $signal (qw(TERM TERM TERM TERM KILL)) {
-            open my $fh, '<', "$run_dir/sshd.pid" or last;
-            my $pid = <$fh>;
-            defined $pid or last;
-            chomp $pid;
-            $pid or last;
-            $sshd->_log("sending $signal signal to server (pid: $pid)");
-            kill $signal => $pid;
-            sleep 1;
+    eval {
+        if (defined (my $run_dir = $sshd->_run_dir)) {
+            for my $signal (qw(TERM TERM TERM TERM KILL)) {
+                open my $fh, '<', "$run_dir/sshd.pid" or last;
+                my $pid = <$fh>;
+                defined $pid or last;
+                chomp $pid;
+                $pid or last;
+                $sshd->_log("sending $signal signal to server (pid: $pid)");
+                kill $signal => $pid;
+                sleep 1;
+            }
         }
-        system 'rm', '-Rf', '--', $last if -d $last;
-        rename $sshd->{run_dir}, $last;
-        $sshd->_log("SSH server logs moved to '$last'");
+        $sshd->SUPER::DESTROY;
     }
+}
+
+sub DESTROY {
+    my $sshd = shift;
+    local ($@, $!, $?, $^E);
+    eval {
+        if (defined (my $run_dir = $sshd->_run_dir)) {
+            if (defined (my $last = $sshd->_run_dir_last)) {
+                # FIXME! unixism follows:
+                system 'rm', '-Rf', '--', $last if -d $last;
+                rename $sshd->{run_dir}, $last;
+                $sshd->_log("SSH server logs moved to '$last'");
+            }
+        }
+    };
 }
 
 sub _sshd_executable { shift->_find_executable('sshd', '-zalacain', 5) }
@@ -143,7 +135,8 @@ sub _create_key {
     -f $fn and -f "$fn.pub" and return 1;
     $sshd->_log("generating key '$fn'");
     my $tmpfn = join('.', $fn, $$, int(rand(9999999)));
-    if ($sshd->_run('ssh_keygen', -t => 'dsa', -b => 1024, -f => $tmpfn, -P => '')) {
+    if ($sshd->_run_cmd( { search_binary => 1 },
+                         'ssh_keygen', -t => 'dsa', -b => 1024, -f => $tmpfn, -P => '')) {
         unlink $fn;
         unlink "$fn.pub";
         if (rename $tmpfn, $fn and
