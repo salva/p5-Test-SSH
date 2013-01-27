@@ -108,21 +108,6 @@ sub DESTROY {
             }
         }
         $sshd->SUPER::DESTROY;
-    }
-}
-
-sub DESTROY {
-    my $sshd = shift;
-    local ($@, $!, $?, $^E);
-    eval {
-        if (defined (my $run_dir = $sshd->_run_dir)) {
-            if (defined (my $last = $sshd->_run_dir_last)) {
-                # FIXME! unixism follows:
-                system 'rm', '-Rf', '--', $last if -d $last;
-                rename $sshd->{run_dir}, $last;
-                $sshd->_log("SSH server logs moved to '$last'");
-            }
-        }
     };
 }
 
