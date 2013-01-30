@@ -1,5 +1,8 @@
 Revision history for Perl extension Test::SSH.
 
+0.04  Jan 30, 2013
+        - add URI as a dependency
+
 0.03  Jan 27, 2013
         - rewrite process handling code
         - remove IPC::Run dependency
