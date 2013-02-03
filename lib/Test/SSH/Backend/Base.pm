@@ -65,6 +65,9 @@ sub _error { shift->_log(error => @_) }
 my $dev_null = File::Spec->devnull;
 sub _dev_null { $dev_null }
 
+my $up_dir = File::Spec->updir;
+my $cur_dir = File::Spec->curdir;
+
 sub _is_server_running { defined(shift->server_version) }
 
 sub _run_remote_cmd {
@@ -110,7 +113,7 @@ sub _find_binaries {
 
     if (defined $sshd->{_ssh_executable}) {
         my $dir = File::Spec->join((File::Spec->splitpath($sshd->{_ssh_executable}))[0,1]);
-        unshift @path, $dir, File::Spec->join($dir, File::Spec->updir, 'sbin');
+        unshift @path, $dir, File::Spec->join($dir, $up_dir, 'sbin');
     }
 
     my @bins;
@@ -286,7 +289,7 @@ sub _run_cmd {
     $sshd->{cmd_output_offset} = tell $out_fh;
     $sshd->{cmd_output_name} = $out_fn;
 
-    if ($^O =~ /^Win/) {
+    if ($^O =~ /^MSWin/) {
         if (defined $password) {
             $sshd->_error('running commands with a password is not supported on windows');
             return;
@@ -461,14 +464,25 @@ sub server_os {
     }
 }
 
+sub _rmdir {
+	my ($sshd, $dir) = @_;
+	if (opendir my $dh, $dir) {
+		while (defined (my $entry = readdir $dh)) {
+			next if $entry eq $up_dir or $entry eq $cur_dir;
+			unlink File::Spec->join($dir, $entry); 
+		}
+		closedir $dh;
+	}
+	unlink $dir;
+}
+
 sub DESTROY {
     my $sshd = shift;
     local ($@, $!, $?, $^E);
     eval {
         if (defined (my $run_dir = $sshd->_run_dir)) {
             if (defined (my $last = $sshd->_run_dir_last)) {
-                # FIXME! unixism follows:
-                system 'rm', '-Rf', '--', $last if -d $last;
+				$sshd->_rmdir($run_dir);
                 rename $sshd->{run_dir}, $last;
                 $sshd->_log("SSH server logs moved to '$last'");
             }

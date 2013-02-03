@@ -15,9 +15,17 @@ my (@extra_path, @default_user_keys, $default_user, $private_dir);
 my @default_test_commands = ('true', 'exit', 'echo foo', 'date',
                              'cmd /c ver', 'cmd /c echo foo');
 
-if ( $^O =~ /^Win/) {
+if ( $^O =~ /^MSWin/) {
     require Win32;
     $default_user = Win32::LoginName();
+	
+	my @pf;
+	for my $folder (qw(PROGRAM_FILES PROGRAM_FILES_COMMON)) {
+		my $dir = eval "Win32::GetFolderPath(Win32::$folder)";
+		if (defined $dir) {
+		    push @extra_path, File::Spec->join($dir, 'PuTTY');
+		}
+	}
 }
 else {
     @extra_path = ( map { File::Spec->join($_, 'bin'), File::Spec->join($_, 'sbin') }
