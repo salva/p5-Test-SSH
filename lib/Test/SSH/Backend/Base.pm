@@ -74,35 +74,61 @@ sub _run_remote_cmd {
     my ($sshd, @cmd) = @_;
 
     if ($sshd->_is_server_running) {
-        my $auth_method = $sshd->{auth_method};
-        my (@auth_args, @auth_opts);
-        if ($auth_method eq 'publickey') {
-            @auth_args = ( -i => $sshd->{key_path},
-                           -o => 'PreferredAuthentications=publickey',
-                           -o => 'BatchMode=yes' );
-        }
-        elsif ($auth_method eq 'password') {
-            @auth_args = ( -o => 'PreferredAuthentications=password,keyboard-interactive',
-                           -o => 'BatchMode=no' );
-            @auth_opts = ( password => $sshd->{password} );
-        }
-        else {
-            $sshd->_error("unsupported authentication method $auth_method");
-            return;
-        }
+	
+		if (defined(my $ssh_exe = $sshd->_ssh_executable)) {
+	
+			my $auth_method = $sshd->{auth_method};
+			my (@auth_args, @auth_opts);
+			if ($auth_method eq 'publickey') {
+				@auth_args = ( -i => $sshd->{key_path},
+							-o => 'PreferredAuthentications=publickey',
+							-o => 'BatchMode=yes' );
+			}
+			elsif ($auth_method eq 'password') {
+				goto plink if $^O =~ /^MSWin/;
+				@auth_args = ( -o => 'PreferredAuthentications=password,keyboard-interactive',
+							-o => 'BatchMode=no' );
+				@auth_opts = ( password => $sshd->{password} );
+			}
+			else {
+				$sshd->_error("unsupported authentication method $auth_method");
+				return;
+			}
 
-        return $sshd->_run_cmd( { search_binary => 1, @auth_opts },
-                                'ssh',
-                                '-T',
-                                -F => $dev_null,
-                                -p => $sshd->{port},
-                                -l => $sshd->{user},
-                                -o => 'StrictHostKeyChecking=no',
-                                -o => "UserKnownHostsFile=$dev_null",
-                                @auth_args,
-                                '--',
-                                $sshd->{host},
-                                @cmd );
+			return $sshd->_run_cmd( { search_binary => 1, @auth_opts },
+									'ssh',
+									'-T',
+									-F => $dev_null,
+									-p => $sshd->{port},
+									-l => $sshd->{user},
+									-o => 'StrictHostKeyChecking=no',
+									-o => "UserKnownHostsFile=$dev_null",
+									@auth_args,
+									'--',
+									$sshd->{host},
+									@cmd );
+		}
+	plink:
+		if (defined (my $plink_exe = $sshd->_plink_executable)) {
+			my $auth_method = $sshd->{auth_method};
+			my (@auth_args, @auth_opts);
+			if ($auth_method eq 'publickey') {
+				$sshd->_error("publickey authentication is not supported using plink yet");
+				return;
+			}
+			elsif ($auth_method eq 'password') {
+				@auth_args = (-pw => $sshd->{password});
+			}
+			else {
+				$sshd->_error("unsupported authentication method $auth_method");
+				return;
+			}
+			
+			return $sshd->_run_cmd( { search_binary => 1, @auth_opts },
+									'plink',
+									...
+			
+		}
     }
 }
 
