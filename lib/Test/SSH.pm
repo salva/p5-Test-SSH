@@ -15,17 +15,48 @@ my (@extra_path, @default_openssh_user_keys, @default_putty_user_keys, $default_
 my @default_test_commands = ('true', 'exit', 'echo foo', 'date',
                              'cmd /c ver', 'cmd /c echo foo');
 
+sub _w32folders {
+    my @paths;
+    for my $folder (@_) {
+        my $dir = eval "Win32::GetShortPathName(Win32::GetFolderPath(Win32::CSIDL_$folder()))";
+        if (defined $dir) {
+            return $dir unless wantarray;
+            push @paths, $dir;
+        }
+    }
+    return @paths;
+}
+
 if ( $^O =~ /^MSWin/) {
     require Win32;
+
+
     $default_user = Win32::LoginName();
-	
-	my @pf;
-	for my $folder (qw(PROGRAM_FILES PROGRAM_FILES_COMMON)) {
-		my $dir = eval "Win32::GetFolderPath(Win32::$folder)";
-		if (defined $dir) {
-		    push @extra_path, File::Spec->join($dir, 'PuTTY');
-		}
-	}
+
+    push @extra_path, map File::Spec->join($_, 'PuTTY'), _w32folders(qw(PROGRAM_FILES PROGRAM_FILES_COMMON));
+
+
+    push @extra_path, ( map { bsd_glob($_, GLOB_NOCASE) } 'c:/MinGW/msys/*/{bin,sbin}');
+
+    my %w32reg;
+    do {
+        local ($@, $!);
+        eval {
+            require Win32::Registry;
+            'Win32::TieRegistry'->import(TiedHash => \%w32reg);
+        };
+    };
+
+    my $cygwin_root = $w32reg{'HKEY_LOCAL_MACHINE\SOFTWARE\Cygwin\setup\rootdir'};
+    $cygwin_root = 'c:\cygwin' unless defined $cygwin_root;
+    if (defined $cygwin_root) {
+        push @extra_path, ( map { File::Spec->join($_, 'bin'), File::Spec->join($_, 'sbin') }
+                            map { File::Spec->join($cygwin_root, $_) }
+                            qw(. usr usr/local) );
+    }
+
+    my $appdata = _w32folders(qw(LOCAL_APPDATA APPDATA));
+    $private_dir = File::Spec->join($appdata, 'libtest-ssh-perl') if defined $appdata;
 }
 else {
     @extra_path = ( map { File::Spec->join($_, 'bin'), File::Spec->join($_, 'sbin') }
@@ -59,7 +90,6 @@ else {
       <$fh> =~ /^PuTTY-User-Key-File/ and
       <$fh> =~ /^Encryption:\s*none/)
 } @default_putty_user_keys;
-
 
 my @default_path = grep { -d $_ } File::Spec->path, @extra_path;
 

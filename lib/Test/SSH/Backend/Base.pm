@@ -168,7 +168,10 @@ sub _run_remote_cmd {
                                -o => 'BatchMode=yes' );
             }
             elsif ($auth_method eq 'password') {
-                goto plink if $^O =~ /^MSWin/;
+                if ($^O =~ /^MSWin/) {
+                    $sshd->_log("password authentication not supported by OpenSSH ssh client on Windows");
+                    goto plink;
+                }
                 @auth_args = ( -o => 'PreferredAuthentications=password,keyboard-interactive',
                                -o => 'BatchMode=no' );
                 $opts{password} = $sshd->{password};
@@ -241,7 +244,9 @@ sub _find_binaries {
     $sshd->_log("search path is " . join(":", @path));
     for my $path (@path) {
         for my $cmd (@cmds) {
-            my $fn = File::Spec->join($path, $cmd);
+            my $exe = $cmd;
+            $exe =~ s/(?:\.exe)?$/.exe/i if $^O =~ /^MSWin/;
+            my $fn = File::Spec->join($path, $exe);
             if (-f $fn) {
                 $sshd->_log("candidate found at $fn");
                 unless (-x $fn) {
@@ -257,7 +262,7 @@ sub _find_binaries {
             }
         }
     }
-    return @bins;
+    return (wantarray ? @bins : $bins[0]);
 }
 
 sub _find_executable {
@@ -442,26 +447,28 @@ sub _run_cmd {
         return unless defined $in_fn;
     }
 
+    my ($pid, $pty);
     if ($^O =~ /^MSWin/) {
         if (defined $password) {
             $sshd->_error('running commands with a password is not supported on windows');
             return;
         }
-        local $@;
-        my $r = eval {
-            local (*STDIN, *STDOUT, *STDERR);
-            open STDIN, '<', $in_fn or die $!;
-            open STDOUT, '>>&', $out_fh or die $!;
-            open STDOUT, '>>&', *STDOUT or die $!;
-            ( delete $opts{async}
-              ? ( system 1, @cmd )
-              : ( system(@cmd) == 0 ) )
-        };
-        $@ and $sshd->_log($@);
-        return $r;
+        my $in_fh;
+        unless (open $in_fh, '<', $in_fn) {
+            $sshd->_error("unable to open file '$in_fn'", $!);
+            return;
+        }
+
+        require IPC::Open3;
+        # IPC::Open3 is a mess!
+        local ($@, *IN, *OUT);
+        open IN, '<&', $in_fh;
+        open OUT, '>>&', $out_fh;
+        $pid = eval { IPC::Open3::open3('<&IN', '>&OUT', '>&OUT', @cmd) };
+        $@ and $sshd->_error("open3 failed", $@);
+        return unless $pid;
     }
     else {
-        my $pty;
         if (defined $password) {
             unless (eval { require IO::Pty; 1 }) {
                 $sshd->_error("IO::Pty not available");
@@ -470,7 +477,7 @@ sub _run_cmd {
             $pty = IO::Pty->new;
         }
 
-        my $pid = fork;
+        $pid = fork;
         unless ($pid) {
             unless (defined $pid) {
                 $sshd->_log("fork failed", $!);
@@ -488,36 +495,37 @@ sub _run_cmd {
             $@ and $sshd->_error($@);
             exit(1);
         }
-        if (delete $opts{async}) {
-            return (wantarray ? ($pid, $pty) : $pid);
-        }
-        else {
-            local $SIG{PIPE} = 'IGNORE';
-            my $end = time + $sshd->{timeout};
-            my $buffer = '';
-            while (1) {
-                if (time > $end) {
-                    kill ((time - $end > 3 ? 'KILL' : 'TERM'), $pid);
-                }
-                if (waitpid($pid, POSIX::WNOHANG()) > 0) {
-                    if ($?) {
-                        $sshd->_log("program failed, rc: $?");
-                        return
-                    }
-                    return 1;
-                }
-                if ($pty) {
-                    my $rv = '';
-                    vec($rv, fileno($pty), 1) = 1;
-                    if (select($rv, undef, undef, 0) > 0) {
-                        sysread($pty, $buffer, 1024, length($buffer));
-                        if ($buffer =~ s/.*[>:?]\s*$//s) {
-                            print $pty "$password\n";
-                        }
-                    }
-                }
-                select(undef, undef, undef, 0.3);
+    }
+    if (delete $opts{async}) {
+        return (wantarray ? ($pid, $pty) : $pid);
+    }
+    else {
+        local $SIG{PIPE} = 'IGNORE';
+        my $end = time + $sshd->{timeout};
+        my $buffer = '';
+        while (1) {
+            if (time > $end) {
+                kill ((time - $end > 3 ? 'KILL' : 'TERM'), $pid);
             }
+            if (waitpid($pid, POSIX::WNOHANG()) > 0) {
+                if ($?) {
+                    $sshd->_log("program failed, rc: $?");
+                    return
+                }
+                $sshd->_log("program exit, rc: $?");
+                return 1;
+            }
+            if ($pty) {
+                my $rv = '';
+                vec($rv, fileno($pty), 1) = 1;
+                if (select($rv, undef, undef, 0) > 0) {
+                    sysread($pty, $buffer, 1024, length($buffer));
+                    if ($buffer =~ s/.*[>:?]\s*$//s) {
+                        print $pty "$password\n";
+                    }
+                }
+            }
+            select(undef, undef, undef, 0.3);
         }
     }
 }
@@ -618,15 +626,21 @@ sub server_os {
 }
 
 sub _rmdir {
-	my ($sshd, $dir) = @_;
-	if (opendir my $dh, $dir) {
-		while (defined (my $entry = readdir $dh)) {
-			next if $entry eq $up_dir or $entry eq $cur_dir;
-			unlink File::Spec->join($dir, $entry); 
-		}
-		closedir $dh;
-	}
-	unlink $dir;
+    my ($sshd, $dir) = @_;
+    if (opendir my $dh, $dir) {
+        while (defined (my $entry = readdir $dh)) {
+            next if $entry eq $up_dir or $entry eq $cur_dir;
+            my $path = File::Spec->join($dir, $entry);
+            unlink $path if -f $path;
+        }
+        closedir $dh;
+    }
+    else {
+        $sshd->_error("unable to open dir '$dir'", $!);
+    }
+    rmdir $dir and return 1;
+    $sshd->_error("unable to unlink '$dir'", $!);
+    return;
 }
 
 sub DESTROY {
@@ -635,8 +649,9 @@ sub DESTROY {
     eval {
         if (defined (my $run_dir = $sshd->_run_dir)) {
             if (defined (my $last = $sshd->_run_dir_last)) {
-				$sshd->_rmdir($last);
-                rename $sshd->{run_dir}, $last;
+                $sshd->_rmdir($last);
+                delete @{$sshd}{qw(client_fhs log_fhs)};
+                rename $sshd->{run_dir}, $last or $sshd->_error("rename failed", $!);
                 $sshd->_log("SSH server logs moved to '$last'");
             }
         }

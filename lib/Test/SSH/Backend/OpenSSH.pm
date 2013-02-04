@@ -35,7 +35,11 @@ sub new {
                          PidFile            => "$run_dir/sshd.pid",
                          PrintLastLog       => 'no',
                          PrintMotd          => 'no',
-                         UseDNS             => 'no')
+                         UseDNS             => 'no',
+                         ( $^O =~ /^MSWin/
+                           ? (UsePrivilegeSeparation => 'no')
+                           : () ),
+                        )
         or return;
 
     $sshd->_log('starting SSH server');
@@ -64,13 +68,19 @@ sub new {
     ()
 }
 
+sub _escape_config {
+    my ($sshd, $v) = @_;
+    $v =~ s/([\\\s])/\\$1/g;
+    return $v;
+}
+
 sub _write_config {
     my $sshd = shift;
-    my $fn = $sshd->{config_file} = "$sshd->{run_dir}/sshd_config";
+    my $fn = $sshd->{config_file} = File::Spec->join($sshd->{run_dir}, 'sshd_config');
     if (open my $fn, '>', $fn) {
         while (@_) {
-            my $k = shift;
-            my $v = shift;
+            my $k = $sshd->_escape_config(shift);
+            my $v = $sshd->_escape_config(shift);
             print $fn "$k=$v\n";
         }
         close $fn and return 1
@@ -144,8 +154,8 @@ sub _user_key_path_quoted {
 sub _create_keys {
     my $sshd = shift;
     my $kdir = $sshd->_private_dir('openssh/keys') or return;
-    my $user_key = $sshd->{user_key_path} = "$kdir/user_key";
-    my $host_key = $sshd->{host_key_path} = "$kdir/host_key";
+    my $user_key = $sshd->{user_key_path} = File::Spec->join($kdir, 'user_key');
+    my $host_key = $sshd->{host_key_path} = File::Spec->join($kdir, 'host_key');
     $sshd->{user_keys} = [$user_key];
     $sshd->_create_key($user_key) and
     $sshd->_create_key($host_key);
