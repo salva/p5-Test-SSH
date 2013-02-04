@@ -10,8 +10,19 @@ use FileHandle;
 
 use Test::SSH::Patch::URI::ssh;
 
-my @private = qw(timeout logger test_commands path user_keys private_dir requested_uri run_server c_params);
-my @public  = qw(host port auth_method password user key_path);
+my @private = qw(timeout logger
+                 test_commands path
+                 openssh_user_keys
+                 putty_user_keys
+                 private_dir
+                 requested_uri
+                 run_server
+                 c_params
+                 plink_only);
+
+my @public  = qw(host port auth_method
+                 password user);
+
 for my $accessor (@public) {
     no strict 'refs';
     *$accessor = sub { shift->{$accessor} }
@@ -39,7 +50,9 @@ sub new {
 
         for (@{$opts{c_params} || []}) {
             if (/^key_path=(.*)$/) {
-                $sshd->{user_keys} = [$1];
+
+                $sshd->{openssh_user_keys} = [$1];
+                $sshd->{putty_user_keys} = [$1];
             }
         }
     }
@@ -70,65 +83,147 @@ my $cur_dir = File::Spec->curdir;
 
 sub _is_server_running { defined(shift->server_version) }
 
+sub _use_key {
+    my ($sshd, $path) = @_;
+    my $type;
+    delete @{$sshd}{'key_path', 'ppk_path'};
+    if (defined $path) {
+        my $fh;
+        unless (open $fh, '<', $path) {
+            $sshd->_error("unable to open key file '$path'", $!);
+            return;
+        }
+        my $line = <$fh>;
+        if ($line =~ /\bBEGIN\b.*\bPRIVATE\s+KEY\b/) {
+            $sshd->{key_path} = $path;
+            return 1;
+        }
+        elsif($line =~ /^PuTTY-User-Key-File/) {
+            $sshd->{ppk_path} = $path;
+            return 1;
+        }
+        else {
+            $sshd->_error("unable to determine format of key from file '$path'");
+            return;
+        }
+    }
+    return 1;
+}
+
+sub key_path {
+    my $sshd = shift;
+    if (not defined $sshd->{key_path} and defined $sshd->{ppk_path}) {
+        my $private = File::Spec->join($sshd->_run_dir, 'key');
+        my $public = File::Spec->join($sshd->_run_dir, 'key.pub');
+        unless ($sshd->_run_cmd({search_binary => 1},
+                                'puttygen',
+                                $sshd->{ppk_path},
+                                -O => 'private-openssh',
+                                -o => $private)
+                and
+                $sshd->_run_cmd({search_binary => 1},
+                                'puttygen',
+                                $sshd->{ppk_path},
+                                -O => 'public-openssh',
+                                -o => $public)) {
+            $sshd->_error("unable to convert PPK key to OpenSSH format");
+            return;
+        }
+        $sshd->{key_path} = $private;
+    }
+    $sshd->{key_path};
+}
+
+sub ppk_path {
+    my $sshd = shift;
+    if (not defined $sshd->{ppk_path} and defined $sshd->{key_path}) {
+        my $ppk = File::Spec->join($sshd->_run_dir, 'key.ppk');
+        unless ($sshd->_run_cmd({search_binary => 1},
+                                'puttygen',
+                                $sshd->{key_path},
+                                -O => 'private',
+                                -o => $ppk)) {
+            $sshd->_error("unable to convert OpenSSH key to PPK format");
+            return;
+        }
+        $sshd->{ppk_path} = $ppk;
+    }
+    $sshd->{ppk_path};
+}
+
 sub _run_remote_cmd {
     my ($sshd, @cmd) = @_;
 
     if ($sshd->_is_server_running) {
-	
-		if (defined(my $ssh_exe = $sshd->_ssh_executable)) {
-	
-			my $auth_method = $sshd->{auth_method};
-			my (@auth_args, @auth_opts);
-			if ($auth_method eq 'publickey') {
-				@auth_args = ( -i => $sshd->{key_path},
-							-o => 'PreferredAuthentications=publickey',
-							-o => 'BatchMode=yes' );
-			}
-			elsif ($auth_method eq 'password') {
-				goto plink if $^O =~ /^MSWin/;
-				@auth_args = ( -o => 'PreferredAuthentications=password,keyboard-interactive',
-							-o => 'BatchMode=no' );
-				@auth_opts = ( password => $sshd->{password} );
-			}
-			else {
-				$sshd->_error("unsupported authentication method $auth_method");
-				return;
-			}
+        $sshd->{plink_only} and goto plink;
 
-			return $sshd->_run_cmd( { search_binary => 1, @auth_opts },
-									'ssh',
-									'-T',
-									-F => $dev_null,
-									-p => $sshd->{port},
-									-l => $sshd->{user},
-									-o => 'StrictHostKeyChecking=no',
-									-o => "UserKnownHostsFile=$dev_null",
-									@auth_args,
-									'--',
-									$sshd->{host},
-									@cmd );
-		}
-	plink:
-		if (defined (my $plink_exe = $sshd->_plink_executable)) {
-			my $auth_method = $sshd->{auth_method};
-			my (@auth_args, @auth_opts);
-			if ($auth_method eq 'publickey') {
-				$sshd->_error("publickey authentication is not supported using plink yet");
-				return;
-			}
-			elsif ($auth_method eq 'password') {
-				@auth_args = (-pw => $sshd->{password});
-			}
-			else {
-				$sshd->_error("unsupported authentication method $auth_method");
-				return;
-			}
-			
-			return $sshd->_run_cmd( { search_binary => 1, @auth_opts },
-									'plink',
-									...
-			
-		}
+        if (defined(my $ssh_exe = $sshd->_ssh_executable)) {
+            my $auth_method = $sshd->{auth_method};
+            my (%opts, @auth_args);
+            if ($auth_method eq 'publickey') {
+                my $key_path = $sshd->key_path;
+                goto plink unless defined $key_path;
+                @auth_args = ( -i => $key_path,
+                               -o => 'PreferredAuthentications=publickey',
+                               -o => 'BatchMode=yes' );
+            }
+            elsif ($auth_method eq 'password') {
+                goto plink if $^O =~ /^MSWin/;
+                @auth_args = ( -o => 'PreferredAuthentications=password,keyboard-interactive',
+                               -o => 'BatchMode=no' );
+                $opts{password} = $sshd->{password};
+            }
+            else {
+                $sshd->_error("unsupported authentication method $auth_method");
+                return;
+            }
+            return $sshd->_run_cmd( \%opts,
+                                    $ssh_exe,
+                                    '-T',
+                                    -F => $dev_null,
+                                    -p => $sshd->{port},
+                                    -l => $sshd->{user},
+                                    -o => 'StrictHostKeyChecking=no',
+                                    -o => "UserKnownHostsFile=$dev_null",
+                                    @auth_args,
+                                    '--',
+                                    $sshd->{host},
+                                    @cmd );
+        }
+
+    plink:
+        if (defined (my $plink_exe = $sshd->_plink_executable)) {
+            my $auth_method = $sshd->{auth_method};
+            my %opts = (yes => 1);
+            my @auth_args;
+            if ($auth_method eq 'publickey') {
+                my $ppk_path = $sshd->ppk_path;
+                unless (defined $ppk_path) {
+                    $sshd->_error("Key is not available on PPK format");
+                    return;
+                }
+                push @auth_args, -i => $ppk_path;
+            }
+            elsif ($auth_method eq 'password') {
+                @auth_args = (-pw => $sshd->{password});
+            }
+            else {
+                $sshd->_error("unsupported authentication method $auth_method");
+                return;
+            }
+
+            return $sshd->_run_cmd( \%opts,
+                                    $plink_exe,
+                                    '-T',
+                                    -P => $sshd->{port},
+                                    -l => $sshd->{user},
+                                    @auth_args,
+                                    $sshd->{host},
+                                    @cmd );
+        }
+
+        $sshd->_error("no SSH client binary found");
+        return;
     }
 }
 
@@ -204,6 +299,8 @@ sub _find_executable {
 
 sub _ssh_executable { shift->_find_executable('ssh', '-V', 5) }
 
+sub _plink_executable { shift->_find_executable('plink') }
+
 sub _mkdir {
     my ($sshd, $dir) = @_;
     if (defined $dir) {
@@ -258,7 +355,7 @@ sub _run_dir {
     $sshd->{run_dir}
 }
 
-sub _run_dir_last { shift->_backend_dir('openssh/run/last') }
+sub _run_dir_last { shift->_backend_dir('run/last') }
 
 sub _fh {
     my ($sshd, $name, $write) = @_;
@@ -291,6 +388,29 @@ sub _write_fh {
     $sshd->_fh($name, 1);
 }
 
+sub _yes_fn {
+    my $sshd = shift;
+    my $yfn = File::Spec->join($sshd->_run_dir, 'yes.txt');
+    unless (-f $yfn) {
+        my $tmp = File::Spec->join($sshd->_run_dir, "yes-$$.txt");
+        my $fh;
+        unless (open $fh, '>', $tmp) {
+            $sshd->_error("unable to open file '$tmp' for writing", $!);
+            return;
+        }
+        print $fh, "y\n\n";
+        unless (close $fh) {
+            $sshd->_error("unable to write data to '$tmp'", $!);
+            return;
+        }
+        unless (rename $tmp, $yfn) {
+            $sshd->_error("unable to rename '$tmp' into '$yfn'", $!);
+            return;
+        }
+    }
+    return $yfn;
+}
+
 sub _run_cmd {
     my $sshd = shift;
     my %opts = (ref $_[0] ? %{shift()} : ());
@@ -315,6 +435,13 @@ sub _run_cmd {
     $sshd->{cmd_output_offset} = tell $out_fh;
     $sshd->{cmd_output_name} = $out_fn;
 
+    my $in_fn = $dev_null;
+    my $yes = delete $opts{yes};
+    if ($yes) {
+        $in_fn = $sshd->_yes_fn;
+        return unless defined $in_fn;
+    }
+
     if ($^O =~ /^MSWin/) {
         if (defined $password) {
             $sshd->_error('running commands with a password is not supported on windows');
@@ -323,7 +450,7 @@ sub _run_cmd {
         local $@;
         my $r = eval {
             local (*STDIN, *STDOUT, *STDERR);
-            open STDIN, '<', $dev_null or die $!;
+            open STDIN, '<', $in_fn or die $!;
             open STDOUT, '>>&', $out_fh or die $!;
             open STDOUT, '>>&', *STDOUT or die $!;
             ( delete $opts{async}
@@ -351,7 +478,7 @@ sub _run_cmd {
             }
             eval {
                 $pty->make_slave_controlling_terminal if $pty;
-                open my $in, '</dev/null';
+                open my $in,   '<',   $in_fn  or die $!;
                 open my $out2, '>>&', $out_fh or die $!;
                 POSIX::dup2(fileno($in),   0) or die $!;
                 POSIX::dup2(fileno($out2), 1) or die $!;
@@ -508,7 +635,7 @@ sub DESTROY {
     eval {
         if (defined (my $run_dir = $sshd->_run_dir)) {
             if (defined (my $last = $sshd->_run_dir_last)) {
-				$sshd->_rmdir($run_dir);
+				$sshd->_rmdir($last);
                 rename $sshd->{run_dir}, $last;
                 $sshd->_log("SSH server logs moved to '$last'");
             }
