@@ -10,7 +10,7 @@ use File::Glob qw(:glob);
 require File::Spec;
 require Test::More;
 
-my (@extra_path, @default_user_keys, $default_user, $private_dir);
+my (@extra_path, @default_openssh_user_keys, @default_putty_user_keys, $default_user, $private_dir);
 
 my @default_test_commands = ('true', 'exit', 'echo foo', 'date',
                              'cmd /c ver', 'cmd /c echo foo');
@@ -40,7 +40,7 @@ else {
                         /opt/*SSH*
                         /opt/*SSH*/* ) );
 
-    @default_user_keys = bsd_glob("~/.ssh/*", GLOB_TILDE);
+    @default_openssh_user_keys = bsd_glob("~/.ssh/*", GLOB_TILDE);
 
     $default_user = getpwuid($>);
 
@@ -48,10 +48,17 @@ else {
 
 }
 
-@default_user_keys = grep {
+@default_openssh_user_keys = grep {
     my $fh;
     open $fh, '<', $_ and <$fh> =~ /\bBEGIN\b.*\bPRIVATE\s+KEY\b/
-} @default_user_keys;
+} @default_openssh_user_keys;
+
+@default_putty_user_keys = grep {
+    my $fh;
+    ( open $fh, '<', $_ and
+      <$fh> =~ /^PuTTY-User-Key-File/ and
+      <$fh> =~ /^Encryption:\s*none/)
+} @default_putty_user_keys;
 
 
 my @default_path = grep { -d $_ } File::Spec->path, @extra_path;
@@ -64,17 +71,19 @@ unless (defined $private_dir) {
 
 my $default_logger = sub { Test::More::diag("Test::SSH > @_") };
 
-my %defaults = ( backends      => [qw(Remote OpenSSH)],
-                 timeout       => 10,
-                 port          => 22,
-                 host          => 'localhost',
-                 user          => $default_user,
-                 test_commands => \@default_test_commands,
-                 path          => \@default_path,
-                 user_keys     => \@default_user_keys,
-                 private_dir   => $private_dir,
-                 logger        => $default_logger,
-                 run_server    => 1,
+my %defaults = ( backends          => [qw(Remote OpenSSH)],
+                 timeout           => 10,
+                 port              => 22,
+                 host              => 'localhost',
+                 user              => $default_user,
+                 test_commands     => \@default_test_commands,
+                 path              => \@default_path,
+                 openssh_user_keys => \@default_openssh_user_keys,
+                 putty_user_keys   => \@default_putty_user_keys,
+                 private_dir       => $private_dir,
+                 logger            => $default_logger,
+                 run_server        => 1,
+                 plink_only        => 0,
                );
 
 sub new {
@@ -89,6 +98,8 @@ sub new {
     if (defined (my $password = $ENV{TEST_SSH_PASSWORD})) {
         $opts{password} = $password;
     }
+
+    $opts{plink_only} = $ENV{TEST_SSH_PLINK_ONLY};
 
     for my $be (@{delete $opts{backends}}) {
         $be =~ /^\w+$/ or croak "bad backend name '$be'";
