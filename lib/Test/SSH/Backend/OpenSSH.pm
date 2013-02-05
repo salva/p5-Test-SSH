@@ -54,6 +54,7 @@ sub new {
 
     $sshd->_log('starting SSH server');
     unless ($sshd->{server_pid} = $sshd->_run_cmd({out_name => 'server',
+                                                   cygwin => 1,
                                                    async => 1},
                                                   $exe,
                                                   '-D', # no daemon
@@ -131,7 +132,13 @@ sub DESTROY {
     };
 }
 
-sub _sshd_executable { shift->_find_executable('sshd', '-zalacain', 5) }
+sub _sshd_executable {
+    shift->_find_executable('sshd',
+                            version_flags => '-zalacain',
+                            min_version => 5,
+                            version_format => 'openssh',
+                            cygwin => 1)
+}
 
 sub _ssh_keygen_executable { shift->_find_executable('ssh-keygen') }
 

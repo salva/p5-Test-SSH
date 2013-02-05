@@ -10,7 +10,9 @@ use File::Glob qw(:glob);
 require File::Spec;
 require Test::More;
 
-my (@extra_path, @default_openssh_user_keys, @default_putty_user_keys, $default_user, $private_dir);
+my (@extra_path, @default_openssh_user_keys, @default_putty_user_keys,
+    @default_cygwin_path,
+    $default_user, $default_private_dir, $default_cygwin_root);
 
 my @default_test_commands = ('true', 'exit', 'echo foo', 'date',
                              'cmd /c ver', 'cmd /c echo foo');
@@ -27,36 +29,35 @@ sub _w32folders {
     return @paths;
 }
 
-if ( $^O =~ /^MSWin/) {
+if ($^O =~ /^MSWin/) {
     require Win32;
-
 
     $default_user = Win32::LoginName();
 
-    push @extra_path, map File::Spec->join($_, 'PuTTY'), _w32folders(qw(PROGRAM_FILES PROGRAM_FILES_COMMON));
-
-
-    push @extra_path, ( map { bsd_glob($_, GLOB_NOCASE) } 'c:/MinGW/msys/*/{bin,sbin}');
+    my $appdata = _w32folders(qw(LOCAL_APPDATA APPDATA));
+    $default_private_dir = File::Spec->join($appdata, 'libtest-ssh-perl') if defined $appdata;
 
     my %w32reg;
     do {
         local ($@, $!);
         eval {
-            require Win32::Registry;
+            require Win32::TieRegistry;
             'Win32::TieRegistry'->import(TiedHash => \%w32reg);
         };
     };
 
-    my $cygwin_root = $w32reg{'HKEY_LOCAL_MACHINE\SOFTWARE\Cygwin\setup\rootdir'};
-    $cygwin_root = 'c:\cygwin' unless defined $cygwin_root;
-    if (defined $cygwin_root) {
+    $default_cygwin_root = $w32reg{'HKEY_LOCAL_MACHINE\SOFTWARE\Cygwin\setup\rootdir'};
+    $default_cygwin_root = 'c:\\cygwin' unless defined $default_cygwin_root;
+    if (defined $default_cygwin_root) {
         push @extra_path, ( map { File::Spec->join($_, 'bin'), File::Spec->join($_, 'sbin') }
-                            map { File::Spec->join($cygwin_root, $_) }
+                            map { File::Spec->join($default_cygwin_root, $_) }
                             qw(. usr usr/local) );
     }
 
-    my $appdata = _w32folders(qw(LOCAL_APPDATA APPDATA));
-    $private_dir = File::Spec->join($appdata, 'libtest-ssh-perl') if defined $appdata;
+    push @extra_path, map File::Spec->join($_, 'PuTTY'), _w32folders(qw(PROGRAM_FILES PROGRAM_FILES_COMMON));
+    push @extra_path, ( map { bsd_glob($_, GLOB_NOCASE) } 'c:/MinGW/msys/*/{bin,sbin}');
+
+    @default_cygwin_path = map { $_. 'bin', $_.'sbin' } qw(/ /usr/ /usr/local/);
 }
 else {
     @extra_path = ( map { File::Spec->join($_, 'bin'), File::Spec->join($_, 'sbin') }
@@ -75,7 +76,7 @@ else {
 
     $default_user = getpwuid($>);
 
-    ($private_dir) = bsd_glob("~/.libtest-ssh-perl", GLOB_TILDE|GLOB_NOCHECK);
+    ($default_private_dir) = bsd_glob("~/.libtest-ssh-perl", GLOB_TILDE|GLOB_NOCHECK);
 
 }
 
@@ -93,9 +94,9 @@ else {
 
 my @default_path = grep { -d $_ } File::Spec->path, @extra_path;
 
-unless (defined $private_dir) {
+unless (defined $default_private_dir) {
     require File::temp;
-    $private_dir = File::Spec->join(File::Temp::tempdir(CLEANUP => 1),
+    $default_private_dir = File::Spec->join(File::Temp::tempdir(CLEANUP => 1),
                                     "libtest-ssh-perl");
 }
 
@@ -110,8 +111,10 @@ my %defaults = ( backends          => [qw(Remote OpenSSH)],
                  path              => \@default_path,
                  openssh_user_keys => \@default_openssh_user_keys,
                  putty_user_keys   => \@default_putty_user_keys,
-                 private_dir       => $private_dir,
+                 private_dir       => $default_private_dir,
                  logger            => $default_logger,
+                 cygwin_root       => $default_cygwin_root,
+                 cygwin_path       => \@default_cygwin_path,
                  run_server        => 1,
                  plink_only        => 0,
                );
