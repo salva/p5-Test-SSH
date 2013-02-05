@@ -18,7 +18,9 @@ my @private = qw(timeout logger
                  requested_uri
                  run_server
                  c_params
-                 plink_only);
+                 plink_only
+                 cygwin_root
+                 cygwin_path );
 
 my @public  = qw(host port auth_method
                  password user);
@@ -31,7 +33,7 @@ for my $accessor (@public) {
 sub new {
     my ($class, %opts) = @_;
 
-    my $sshd = {};
+    my $sshd = { seq => 1 };
     bless $sshd, $class;
     $sshd->{$_} = delete($opts{$_}) for (@public, @private);
 
@@ -57,11 +59,48 @@ sub new {
         }
     }
 
+    if (defined $sshd->{cygwin_root}) {
+        $sshd->{cygwin_root} =~ s|\\*$|\\|;
+    }
+
     $sshd->_write_fh('log'); # opens log file
     $sshd->_log("starting backend of class '$class'");
 
     return $sshd;
 }
+
+sub _save_to_file {
+    my $sshd = shift;
+    my $name = shift;
+    my $tmp_name = $name;
+    $tmp_name =~ s/(?:\.[^.]*)?$/$sshd->_seq."$$.tmp"/e;
+    my $fh;
+    unless (open $fh, '>', $tmp_name) {
+        $sshd->_error("unable to open '$tmp_name'", $!);
+        return;
+    }
+    print $fh $_ for @_;
+    unless (close $fh) {
+        $sshd->_error("unable to write data into '$tmp_name'", $!);
+        return;
+    }
+    unless (rename $tmp_name, $name) {
+        $sshd->_error("unable to move '$tmp_name' to its final destination '$name'", $!);
+        return
+    }
+    1;
+}
+
+sub _quote_unix {
+    my ($sshd, @args) = @_;
+    for (@args) {
+        s/'/\\'/g;
+        $_ = "'$_'";
+    }
+    wantarray ? @args : join(" ", @args);
+}
+
+sub _seq { shift->{seq}++ }
 
 sub _log {
     local ($@, $!, $?, $^E);
@@ -230,31 +269,66 @@ sub _run_remote_cmd {
     }
 }
 
-sub _find_binaries {
-    my ($sshd, @cmds) = @_;
-    $sshd->_log("resolving command(s) @cmds");
-    my @path = @{$sshd->{path}};
+sub _cygdrive {
+    my $sshd = shift;
+    my $out = $sshd->_capture("cd \\; $sshd->{cygwin_root}\\bin\\bash.exe -c pwd");
+    chomp $out;
+    if ($out =~ s|/\w$||) {
+        return $out;
+    }
+    ();
+}
 
-    if (defined $sshd->{_ssh_executable}) {
-        my $dir = File::Spec->join((File::Spec->splitpath($sshd->{_ssh_executable}))[0,1]);
-        unshift @path, $dir, File::Spec->join($dir, $up_dir, 'sbin');
+sub _find_binaries {
+    my $sshd = shift;
+    my %opts = (ref $_[0] ? %{shift()} : ());
+    my @cmds = @_;
+    $sshd->_log("resolving command(s) @cmds");
+
+    my (@path, $cygwin, $cygwin_root);
+    if ($^O =~ /MSWin/ and delete $opts{cygwin}) {
+        $cygwin = 1;
+        $cygwin_root = $sshd->{cygwin_root};
+        unless (defined $cygwin_root) {
+            $sshd->_error("cygwin root is not defined, aborting cmd search");
+            return;
+        }
+        @path = @{$sshd->{cygwin_path}};
+        $sshd->_log("cygwin search path is " . join(":", @path));
+    }
+    else {
+        @path = @{$sshd->{path}};
+        if (defined $sshd->{_ssh_executable}) {
+            my $dir = File::Spec->join((File::Spec->splitpath($sshd->{_ssh_executable}))[0,1]);
+            unshift @path, $dir, File::Spec->join($dir, $up_dir, 'sbin');
+        }
+        $sshd->_log("search path is " . join(($^O =~ /^MSWin/ ? ";" : ":"), @path));
     }
 
     my @bins;
-    $sshd->_log("search path is " . join(":", @path));
     for my $path (@path) {
         for my $cmd (@cmds) {
             my $exe = $cmd;
             $exe =~ s/(?:\.exe)?$/.exe/i if $^O =~ /^MSWin/;
-            my $fn = File::Spec->join($path, $exe);
-            if (-f $fn) {
-                $sshd->_log("candidate found at $fn");
-                unless (-x $fn) {
-                    $sshd->_log("file $fn is not executable");
+
+            my ($fn, $test_fn);
+            if ($cygwin) {
+                my $path1 = $path;
+                $path1 =~ s|^/+||;
+                $test_fn = File::Spec->join($cygwin_root, $path1, $exe);
+                $fn = "$path/$cmd";
+            }
+            else {
+                $test_fn = $fn = File::Spec->join($path, $exe);
+            }
+            if (-f $test_fn) {
+                $sshd->_log("candidate found at $test_fn");
+                unless (-x $test_fn) {
+                    $sshd->_log("file $test_fn is not executable");
                     next;
                 }
-                unless (-B $fn) {
-                    $sshd->_log("file $fn looks like a wrapper, ignoring it");
+                unless (-B $test_fn) {
+                    $sshd->_log("file $test_fn looks like a wrapper, ignoring it");
                     next;
                 }
                 return $fn unless wantarray;
@@ -266,27 +340,42 @@ sub _find_binaries {
 }
 
 sub _find_executable {
-    my ($sshd, $cmd, $version_flags, $min_version) = @_;
+    my ($sshd, $cmd, %opts) = @_;
     my $slot = "${cmd}_executable";
     defined $sshd->{$slot} and return $sshd->{$slot};
+
+    my $version_flags = delete $opts{version_flags};
+    my $min_version = delete $opts{min_version};
+    my $version_format = delete $opts{version_format};
+    my $cygwin = delete $opts{cygwin};
+
     if (defined $version_flags) {
-        for my $bin ($sshd->_find_binaries($cmd)) {
+        defined $min_version or die "internal error: min_version is undefined";
+        for my $bin ($sshd->_find_binaries({cygwin => $cygwin}, $cmd)) {
             $sshd->_log("checking version of '$bin'");
-            my $out = $sshd->_capture_cmd( $bin, $version_flags );
+            my $out = $sshd->_capture_cmd( { cygwin => $cygwin}, $bin, $version_flags );
             if (defined $out) {
-                if (my ($ver, $mayor) = $out =~ /^(OpenSSH[_\-](\d+)\.\d+(?:p\d+))/m) {
-                    if (!defined($min_version) or $mayor >= $min_version) {
-                        $sshd->_log("executable version is $ver, selecting it!");
-                        $sshd->{$slot} = $bin;
-                        last;
-                    }
-                    else {
-                        $sshd->_log("executable is too old ($ver), $min_version.x required");
+                my ($ver, $nver);
+                if ($version_format eq 'openssh') {
+                    unless (($ver, $nver) = $out =~ /^(OpenSSH[_\-](\d+\.\d+)(?:p\d+))/m) {
+                        $sshd->_error("unable to retrieve version information from command");
                         next;
                     }
                 }
+                else {
+                    # FIXME: add checks for plink and other version strings";
+                    $sshd->_error("version check not implemented for command");
+                }
+                if ($nver >= $min_version) {
+                    $sshd->_log("executable version is $ver, selecting it!");
+                    $sshd->{$slot} = $bin;
+                    last;
+                }
+                $sshd->_log("executable is too old ($ver), $min_version.x required");
             }
-            $sshd->_log("command failed");
+            else {
+                $sshd->_log("command failed");
+            }
         }
     }
     else {
@@ -302,7 +391,12 @@ sub _find_executable {
     }
 }
 
-sub _ssh_executable { shift->_find_executable('ssh', '-V', 5) }
+sub _ssh_executable {
+    shift->_find_executable('ssh',
+                            version_flags => '-V',
+                            min_version => 5,
+                            version_format => 'openssh')
+}
 
 sub _plink_executable { shift->_find_executable('plink') }
 
@@ -397,21 +491,7 @@ sub _yes_fn {
     my $sshd = shift;
     my $yfn = File::Spec->join($sshd->_run_dir, 'yes.txt');
     unless (-f $yfn) {
-        my $tmp = File::Spec->join($sshd->_run_dir, "yes-$$.txt");
-        my $fh;
-        unless (open $fh, '>', $tmp) {
-            $sshd->_error("unable to open file '$tmp' for writing", $!);
-            return;
-        }
-        print $fh, "y\n\n";
-        unless (close $fh) {
-            $sshd->_error("unable to write data to '$tmp'", $!);
-            return;
-        }
-        unless (rename $tmp, $yfn) {
-            $sshd->_error("unable to rename '$tmp' into '$yfn'", $!);
-            return;
-        }
+        $sshd->_save_to_file($yfn, "y\n\n") or return;
     }
     return $yfn;
 }
@@ -453,6 +533,19 @@ sub _run_cmd {
             $sshd->_error('running commands with a password is not supported on windows');
             return;
         }
+
+        if (delete $opts{cygwin}) {
+            my $cygwin_root = $sshd->{cygwin_root};
+            unless (defined $cygwin_root) {
+                $sshd->_error("cygwin required for running command");
+                return;
+            }
+            my $script = File::Spec->join($sshd->_run_dir, 'cmd'.$sshd->_seq.'.sh');
+            my $cmd = $sshd->_quote_unix(@cmd);
+            $sshd->_save_to_file($script, $cmd);
+            @cmd = (File::Spec->join($cygwin_root, "bin", "bash"), $script);
+        }
+
         my $in_fh;
         unless (open $in_fh, '<', $in_fn) {
             $sshd->_error("unable to open file '$in_fn'", $!);
