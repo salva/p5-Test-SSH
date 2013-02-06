@@ -272,7 +272,7 @@ sub _run_remote_cmd {
 sub _cygdrive {
     my $sshd = shift;
     unless (defined $sshd->{cygdrive}) {
-        my $cygdrive = $sshd->_capture_cmd("cd \\; $sshd->{cygwin_root}\\bin\\bash.exe -c pwd");
+        my $cygdrive = $sshd->_capture_cmd("cd \\ & $sshd->{cygwin_root}\\bin\\bash.exe -c pwd");
         chomp $cygdrive;
         unless ($cygdrive =~ s|/\w$||) {
             $sshd->_error("unable to infer cygdrive directory");
@@ -283,23 +283,35 @@ sub _cygdrive {
     $sshd->{cygdrive};
 }
 
+sub _path_to_unix {
+    my ($sshd, $path) = @_;
+    ( $^O =~ /^MSWin/
+      ? $sshd->_w32path_to_cygwin($path)
+      : $path );
+}
+
 sub _w32path_to_cygwin {
     my ($sshd, $path) = @_;
     my $cygwin_root = $sshd->{cygwin_root};
-    my $short = Win32::GetShortPathName(File::Spec->rel2abs($path));
+    my $abs = File::Spec->rel2abs($path);
+    my $short = Win32::GetShortPathName($abs);
+    $short = $abs unless defined $short;
     my $rel = File::Spec->abs2rel($short, $cygwin_root);
+    my $cwp;
     if ($rel =~ /^(?:\.\.\\|.:)/) {
         my $cygdrive = $sshd->_cygdrive;
         return unless defined $cygdrive;
         my ($unit, $dir) = File::Spec->splitpath($short, 1);
         $unit =~ s|:||;
         $dir =~ s|\\|/|g;
-        return "$cygdrive/$unit$dir"
+        $cwp = "$cygdrive/$unit$dir"
     }
     else {
-        $rel =~ s|\\|/|g;
-        return $rel;
+        $cwp = $rel;
+        $cwp =~ s|\\|/|g;
     }
+    $sshd->_log("path '$path' resolved for cygwin as '$cwp'");
+    $cwp
 }
 
 sub _find_binaries {

@@ -24,7 +24,7 @@ sub new {
     use Tie::IxHash; # order must be preserved because Port must come before ListenAddress
 
     tie my %Config, 'Tie::IxHash',
-        (                HostKey            => $sshd->{host_key_path},
+        (                HostKey            => $sshd->_path_to_unix($sshd->{host_key_path}),
                          AuthorizedKeysFile => $sshd->_user_key_path_quoted . ".pub",
                          AllowUsers         => $sshd->{user}, # only user running the script can log
                          AllowTcpForwarding => 'yes',
@@ -35,7 +35,7 @@ sub new {
                          ListenAddress      => "localhost:$port",
                          LogLevel           => 'INFO',
                          PermitRootLogin    => 'yes',
-                         PidFile            => "$run_dir/sshd.pid",
+                         PidFile            => $sshd->_path_to_unix($run_dir) . "/sshd.pid",
                          PrintLastLog       => 'no',
                          PrintMotd          => 'no',
                          Subsystem          => 'sftp /usr/lib/openssh/sftp-server',
@@ -59,7 +59,7 @@ sub new {
                                                   $exe,
                                                   '-D', # no daemon
                                                   '-e', # send output to STDERR
-                                                  '-f', $sshd->{config_file})) {
+                                                  '-f', $sshd->_path_to_unix($sshd->{config_file}))) {
         $sshd->_error("unable to start SSH server at '$exe' on port $port", $!);
         return undef;
     }
@@ -140,15 +140,18 @@ sub _sshd_executable {
                             cygwin => 1)
 }
 
-sub _ssh_keygen_executable { shift->_find_executable('ssh-keygen') }
+sub _ssh_keygen_executable { shift->_find_executable('ssh-keygen',
+                                                     cygwin => 1) }
 
 sub _create_key {
     my ($sshd, $fn) = @_;
     -f $fn and -f "$fn.pub" and return 1;
     $sshd->_log("generating key '$fn'");
-    my $tmpfn = join('.', $fn, $$, int(rand(9999999)));
-    if ($sshd->_run_cmd( { search_binary => 1 },
-                         'ssh_keygen', -t => 'rsa', -b => 1024, -f => $tmpfn, -P => '')) {
+    my $tmpfn = $fn;
+    $tmpfn =~ s/(?:\.[^.]*)?$/$$.'-'.$sshd->_seq.'.tmp'/e;
+    if ($sshd->_run_cmd( { cygwin => 1 },
+                         'ssh-keygen', -t => 'rsa', -b => 1024, -P => '',
+                         -f => $sshd->_path_to_unix($tmpfn))) {
         unlink $fn;
         unlink "$fn.pub";
         if (rename $tmpfn, $fn and
@@ -163,7 +166,7 @@ sub _create_key {
 
 sub _user_key_path_quoted {
     my $sshd = shift;
-    my $key = $sshd->{user_key_path};
+    my $key = $sshd->_path_to_unix($sshd->{user_key_path});
     $key =~ s/%/%%/g;
     $key;
 }
