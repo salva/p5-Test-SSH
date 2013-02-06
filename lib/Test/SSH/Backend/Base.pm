@@ -271,12 +271,35 @@ sub _run_remote_cmd {
 
 sub _cygdrive {
     my $sshd = shift;
-    my $out = $sshd->_capture("cd \\; $sshd->{cygwin_root}\\bin\\bash.exe -c pwd");
-    chomp $out;
-    if ($out =~ s|/\w$||) {
-        return $out;
+    unless (defined $sshd->{cygdrive}) {
+        my $cygdrive = $sshd->_capture_cmd("cd \\; $sshd->{cygwin_root}\\bin\\bash.exe -c pwd");
+        chomp $cygdrive;
+        unless ($cygdrive =~ s|/\w$||) {
+            $sshd->_error("unable to infer cygdrive directory");
+            return;
+        }
+        $sshd->{cygdrive} = $cygdrive;
     }
-    ();
+    $sshd->{cygdrive};
+}
+
+sub _w32path_to_cygwin {
+    my ($sshd, $path) = @_;
+    my $cygwin_root = $sshd->{cygwin_root};
+    my $short = Win32::GetShortPathName(File::Spec->rel2abs($path));
+    my $rel = File::Spec->abs2rel($short, $cygwin_root);
+    if ($rel =~ /^(?:\.\.\\|.:)/) {
+        my $cygdrive = $sshd->_cygdrive;
+        return unless defined $cygdrive;
+        my ($unit, $dir) = File::Spec->splitpath($short, 1);
+        $unit =~ s|:||;
+        $dir =~ s|\\|/|g;
+        return "$cygdrive/$unit$dir"
+    }
+    else {
+        $rel =~ s|\\|/|g;
+        return $rel;
+    }
 }
 
 sub _find_binaries {
@@ -543,7 +566,9 @@ sub _run_cmd {
             my $script = File::Spec->join($sshd->_run_dir, 'cmd'.$sshd->_seq.'.sh');
             my $cmd = $sshd->_quote_unix(@cmd);
             $sshd->_save_to_file($script, $cmd);
-            @cmd = (File::Spec->join($cygwin_root, "bin", "bash"), $script);
+            @cmd = ( File::Spec->join($cygwin_root, "bin", "bash"),
+                     '--login',
+                     $sshd->_w32path_to_cygwin($script) );
         }
 
         my $in_fh;
