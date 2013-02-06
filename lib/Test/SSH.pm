@@ -48,6 +48,8 @@ if ($^O =~ /^MSWin/) {
 
     $default_cygwin_root = $w32reg{'HKEY_LOCAL_MACHINE\SOFTWARE\Cygwin\setup\rootdir'};
     $default_cygwin_root = 'c:\\cygwin' unless defined $default_cygwin_root;
+    $default_cygwin_root = Win32::GetShortPathName($default_cygwin_root);
+
     if (defined $default_cygwin_root) {
         push @extra_path, ( map { File::Spec->join($_, 'bin'), File::Spec->join($_, 'sbin') }
                             map { File::Spec->join($default_cygwin_root, $_) }
