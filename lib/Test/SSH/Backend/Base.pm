@@ -731,11 +731,14 @@ sub server_version {
                 my $rv = '';
                 vec($rv, fileno($socket), 1) = 1;
                 if (select($rv, undef, undef, 1) > 0) {
-                    sysread($socket, $buffer, 1024, length($buffer)) or last;
+                    my $bytes = sysread($socket, $buffer, 1024, length($buffer));
+                    # $sshd->_log((defined $bytes ? $bytes : '<undef>') . " bytes read from socket", substr($buffer, -$bytes));
+                    last unless $bytes;
                 }
             }
             if ($buffer =~ /^(.*)\n/) {
                 $sshd->{server_version} = $1;
+                $sshd->_log("server version is $sshd->{server_version}");
             }
             else {
                 $sshd->_log("unable to retrieve server version");
