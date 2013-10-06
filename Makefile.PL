@@ -1,4 +1,3 @@
-
 use ExtUtils::MakeMaker;
 
 WriteMakefile( NAME          => 'Test::SSH',
@@ -6,5 +5,11 @@ WriteMakefile( NAME          => 'Test::SSH',
                PREREQ_PM     => { Test::More => '0',
                                   URI => '1.60' },
                ABSTRACT_FROM => 'lib/Test/SSH.pm',
-               AUTHOR        => 'Salvador Fandiño <sfandino@yahoo.com>');
+               AUTHOR        => 'Salvador Fandiño <sfandino@yahoo.com>',
+               META_MERGE    => {
+                   resources => {
+                       repository => 'https://github.com/salva/p5-Test-SSH',
+                   },
+               },
+);
 
