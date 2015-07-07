@@ -148,7 +148,7 @@ sub _find_executable {
             $sshd->_log("checking version of '$bin'");
             my $out = $sshd->_capture_cmd( $bin, $version_flags );
             if (defined $out) {
-                if (my ($ver, $mayor) = $out =~ /^(OpenSSH[_\-](\d+)\.\d+(?:p\d+))/m) {
+                if (my ($ver, $mayor) = $out =~ /^(OpenSSH[_\-](\d+)\.\d+(?:\.\d+)?(?:p\d+))/m) {
                     if (!defined($min_version) or $mayor >= $min_version) {
                         $sshd->_log("executable version is $ver, selecting it!");
                         $sshd->{$slot} = $bin;
