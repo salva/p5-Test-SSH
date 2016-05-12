@@ -35,7 +35,8 @@ sub new {
                          PidFile            => "$run_dir/sshd.pid",
                          PrintLastLog       => 'no',
                          PrintMotd          => 'no',
-                         UseDNS             => 'no')
+                         UseDNS             => 'no',
+                         UsePrivilegeSeparation => 'no')
         or return;
 
     $sshd->_log('starting SSH server');
