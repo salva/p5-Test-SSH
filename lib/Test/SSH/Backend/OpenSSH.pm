@@ -122,7 +122,7 @@ sub _create_key {
     $sshd->_log("generating key '$fn'");
     my $tmpfn = join('.', $fn, $$, int(rand(9999999)));
     if ($sshd->_run_cmd( { search_binary => 1 },
-                         'ssh_keygen', -t => 'dsa', -b => 1024, -f => $tmpfn, -P => '')) {
+                         'ssh_keygen', -t => 'rsa', -b => 1024, -f => $tmpfn, -P => '')) {
         unlink $fn;
         unlink "$fn.pub";
         if (rename $tmpfn, $fn and
