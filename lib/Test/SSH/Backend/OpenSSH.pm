@@ -37,6 +37,7 @@ sub new {
                          PidFile            => "$run_dir/sshd.pid",
                          PrintLastLog       => 'no',
                          PrintMotd          => 'no',
+                         Subsystem          => 'sftp /usr/lib/openssh/sftp-server',
                          UseDNS             => 'no',
                          UsePrivilegeSeparation => 'no',
         );
