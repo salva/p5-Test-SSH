@@ -1,4 +1,5 @@
 use ExtUtils::MakeMaker;
+use utf8;
 
 WriteMakefile( NAME          => 'Test::SSH',
                VERSION_FROM  => 'lib/Test/SSH.pm',
