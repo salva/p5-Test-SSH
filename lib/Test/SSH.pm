@@ -1,6 +1,6 @@
 package Test::SSH;
 
-our $VERSION = '0.04';
+our $VERSION = '0.05_01';
 
 use strict;
 use warnings;

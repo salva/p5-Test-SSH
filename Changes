@@ -1,5 +1,15 @@
 Revision history for Perl extension Test::SSH.
 
+0.05_01 May 23, 2016
+        - solve windows problems (Salvador Fandiño)
+        - working on running remote command with plink (Salvador Fandiño)
+        - Added repository cpan metadata to Makefile.PL (David Steinbrunner)
+        - FIX: OpenSSH backend won't start for non-root users under debian stable (joe <draxil...>)
+        - recognise OpenSSH on Ubuntu Trusty (Pavel Shaydo)
+        - use a key type rsa, not dsaw (Andreas König)
+        - Add a convenient way to override sshd server configuration (Andreas König)
+        - Add the Subsystem for sftp to the default server configuration (Andreas König)
+
 0.04  Jan 30, 2013
         - add URI as a dependency
 
