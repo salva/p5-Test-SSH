@@ -230,6 +230,13 @@ For instance:
 
   my $sshd = Test::SSH->new(run_server => ($ENV{AUTHOR_TESTING} || $ENV{AUTOMATED_TESTING}));
 
+=item override_server_config => $hash_reference
+
+Key/Value pairs in this hash reference will be used to override the
+defaults for the C<sshd_config> file of the C<sshd> server started. If
+a value in this hash is undef, the respective key of the server config
+will be deleted.
+
 =back
 
 Also, the following environment variables can be used to change the

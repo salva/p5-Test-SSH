@@ -10,6 +10,7 @@ our @ISA = qw(Test::SSH::Backend::Base);
 
 sub new {
     my ($class, %opts) = @_;
+    my $override_server_config = delete $opts{override_server_config} || {};
     my $sshd = $class->SUPER::new(%opts, auth_method => 'publickey');
     unless ($sshd->{run_server}) {
         $sshd->_log("backend skipped because run_server is set to false");
@@ -21,7 +22,8 @@ sub new {
     my $run_dir = $sshd->_run_dir;
     my $port = $sshd->{port} = $sshd->_find_unused_port;
 
-    $sshd->_write_config(HostKey            => $sshd->{host_key_path},
+    my %Config =
+        (                HostKey            => $sshd->{host_key_path},
                          AuthorizedKeysFile => $sshd->_user_key_path_quoted . ".pub",
                          AllowUsers         => $sshd->{user}, # only user running the script can log
                          AllowTcpForwarding => 'yes',
@@ -36,7 +38,16 @@ sub new {
                          PrintLastLog       => 'no',
                          PrintMotd          => 'no',
                          UseDNS             => 'no',
-                         UsePrivilegeSeparation => 'no')
+                         UsePrivilegeSeparation => 'no',
+        );
+    while (my($k,$v) = each %$override_server_config) {
+        if (defined $v) {
+            $Config{$k} = $v;
+        } else {
+            delete $Config{$k};
+        }
+    }
+    $sshd->_write_config(%Config)
         or return;
 
     $sshd->_log('starting SSH server');
