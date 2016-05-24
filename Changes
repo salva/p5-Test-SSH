@@ -1,5 +1,8 @@
 Revision history for Perl extension Test::SSH.
 
+0.06_01 May 24, 2016
+        - preserve order of %Config hash
+
 0.05_01 May 23, 2016
         - solve windows problems (Salvador Fandiño)
         - working on running remote command with plink (Salvador Fandiño)
