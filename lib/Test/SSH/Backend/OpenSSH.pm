@@ -21,8 +21,9 @@ sub new {
     $sshd->_create_keys or return;
     my $run_dir = $sshd->_run_dir;
     my $port = $sshd->{port} = $sshd->_find_unused_port;
+    use Tie::IxHash; # order must be preserved because Port must come before ListenAddress
 
-    my %Config =
+    tie my %Config, 'Tie::IxHash',
         (                HostKey            => $sshd->{host_key_path},
                          AuthorizedKeysFile => $sshd->_user_key_path_quoted . ".pub",
                          AllowUsers         => $sshd->{user}, # only user running the script can log
