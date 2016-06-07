@@ -1,5 +1,8 @@
 Revision history for Perl extension Test::SSH.
 
+0.07  Jun 07, 2016
+        - just a version bump, no other change compared to 0.06_01
+
 0.06_01 May 24, 2016
         - preserve order of %Config hash
 
