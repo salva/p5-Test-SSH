@@ -134,6 +134,10 @@ Test::SSH - Perl extension for testing SSH modules.
 
 =head1 DESCRIPTION
 
+B<Important>: This module is being replaced by
+L<Net::SSH::Any::Test>. Development of C<Test::SSH> is now mostly
+limited to bug fixing!
+
 In order to test properly Perl modules that use the SSH protocol, a
 running server and a set of valid authentication credentials are
 required.
