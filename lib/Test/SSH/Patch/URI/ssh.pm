@@ -3,6 +3,7 @@ package Test::SSH::Patch::URI::ssh;
 use strict;
 use warnings;
 no warnings 'redefine';
+require URI::Escape;
 
 require URI::ssh;
 unless (URI::ssh->can('c_params')) {
@@ -75,7 +76,7 @@ unless (URI::ssh->can('c_params')) {
             $self->sshinfo($new);
         }
         return undef if !defined($old) || $old !~ /;(.+)/;
-        [map uri_unescape($_), split /,/, $1];
+        [map URI::Escape::uri_unescape($_), split /,/, $1];
     }
 };
 
